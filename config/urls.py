@@ -22,8 +22,8 @@ urlpatterns = [
     path("", TemplateView.as_view(template_name="landing.html"), name="landing"),
     path("admin/", admin.site.urls),
     path("api/schema.json", schema_view.without_ui(cache_timeout=0), name="schema-json"),
-    path("api/docs/", schema_view.with_ui("swagger", cache_timeout=0), name="swagger-ui"),
-    path("api/redoc/", schema_view.with_ui("redoc", cache_timeout=0), name="redoc"),
+    path("swagger", schema_view.with_ui("swagger", cache_timeout=0), name="swagger-ui"),
+    path("redoc", schema_view.with_ui("redoc", cache_timeout=0), name="redoc"),
     path("api/", include("apps.files.urls")),
     path("<uuid:file_id>", FileResolveView.as_view(), name="file-resolve"),
 ]
