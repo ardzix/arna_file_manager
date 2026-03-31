@@ -17,7 +17,5 @@ RUN pip install --no-cache-dir --upgrade pip && pip install --no-cache-dir -r /a
 COPY . /app
 COPY supervisord.conf /etc/supervisor/conf.d/supervisord.conf
 
-EXPOSE 8000
-
 CMD ["/usr/bin/supervisord", "-c", "/etc/supervisor/conf.d/supervisord.conf"]
 
