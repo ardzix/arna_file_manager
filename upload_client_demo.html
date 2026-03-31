@@ -1,0 +1,727 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>File Manager Demo</title>
+  <style>
+    :root {
+      --bg: #f3f7ff;
+      --card: #ffffff;
+      --text: #1f2937;
+      --muted: #64748b;
+      --primary: #0f62fe;
+      --accent: #12b886;
+      --border: #dbe4f0;
+      --shadow: 0 8px 30px rgba(15, 98, 254, 0.08);
+      --err: #dc2626;
+      --warn: #b45309;
+    }
+
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Segoe UI", Arial, sans-serif;
+      color: var(--text);
+      background:
+        radial-gradient(circle at 10% 20%, #e2ecff 0, transparent 40%),
+        radial-gradient(circle at 80% 10%, #e3fff3 0, transparent 35%),
+        linear-gradient(135deg, #f4f7ff, #f8fbff);
+    }
+
+    .wrap {
+      max-width: 1200px;
+      margin: 20px auto 30px;
+      padding: 0 16px;
+    }
+
+    .title {
+      background: linear-gradient(120deg, #0f62fe, #0c4dcc);
+      color: #fff;
+      border-radius: 14px;
+      padding: 16px;
+      box-shadow: var(--shadow);
+      margin-bottom: 12px;
+    }
+
+    .title h1 { margin: 0 0 8px; font-size: 1.35rem; }
+    .title p { margin: 0; opacity: 0.9; }
+
+    .layout {
+      display: grid;
+      grid-template-columns: 380px 1fr;
+      gap: 12px;
+    }
+
+    .card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 14px;
+      box-shadow: var(--shadow);
+    }
+
+    h2 {
+      margin: 0 0 10px;
+      font-size: 1rem;
+    }
+
+    .field {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      margin-bottom: 8px;
+    }
+
+    label {
+      color: var(--muted);
+      font-size: 0.86rem;
+    }
+
+    input, select, button, textarea {
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 9px 10px;
+      font-size: 0.92rem;
+      font-family: inherit;
+    }
+
+    input, select, textarea { background: #fff; }
+
+    button {
+      border: none;
+      cursor: pointer;
+      color: #fff;
+      background: var(--primary);
+      transition: transform 0.16s ease, opacity 0.16s ease;
+    }
+
+    button:hover { transform: translateY(-1px); }
+    button:disabled { opacity: 0.6; cursor: not-allowed; transform: none; }
+    button.secondary { background: #334155; }
+    button.success { background: var(--accent); }
+    button.warn { background: var(--warn); }
+
+    .button-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 8px;
+    }
+
+    .progress-shell {
+      height: 14px;
+      border-radius: 999px;
+      background: #e5edf8;
+      overflow: hidden;
+      border: 1px solid #d6e1f1;
+      margin-top: 6px;
+    }
+
+    .progress-bar {
+      height: 100%;
+      width: 0%;
+      background: linear-gradient(90deg, #0f62fe, #12b886);
+      transition: width 0.2s ease;
+    }
+
+    .progress-text {
+      font-size: 0.85rem;
+      color: var(--muted);
+      margin-top: 4px;
+    }
+
+    .status {
+      margin: 6px 0;
+      font-size: 0.9rem;
+      color: var(--muted);
+    }
+    .status.ok { color: #0f9d58; }
+    .status.err { color: var(--err); }
+    .status.warn { color: var(--warn); }
+
+    .browser-toolbar {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-bottom: 8px;
+    }
+
+    .breadcrumbs {
+      border: 1px dashed #cad7eb;
+      background: #f8fbff;
+      border-radius: 8px;
+      padding: 7px 9px;
+      margin-bottom: 8px;
+      font-size: 0.88rem;
+      color: #334155;
+    }
+
+    .items {
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      overflow: hidden;
+    }
+
+    .item {
+      display: grid;
+      grid-template-columns: 1fr auto auto auto;
+      gap: 8px;
+      align-items: center;
+      padding: 10px 12px;
+      border-bottom: 1px solid #edf2fa;
+      background: #fff;
+      animation: fadeIn 0.2s ease;
+    }
+    .item:last-child { border-bottom: none; }
+    .item-name { font-size: 0.92rem; }
+    .item-meta { color: var(--muted); font-size: 0.82rem; }
+    .item-kind { font-size: 0.78rem; color: #334155; }
+
+    textarea {
+      width: 100%;
+      min-height: 170px;
+      resize: vertical;
+      white-space: pre;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+
+    .small {
+      font-size: 0.83rem;
+      color: var(--muted);
+      line-height: 1.4;
+    }
+
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(4px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    @media (max-width: 980px) {
+      .layout {
+        grid-template-columns: 1fr;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="title">
+      <h1>File Manager Client Demo (Upload + Browser)</h1>
+      <p>Satu file HTML untuk meniru konsep end-to-end: multipart upload, progress, folder browser, dan API interaction.</p>
+    </div>
+
+    <div class="card" style="margin-bottom: 12px;">
+      <h2>How To Run</h2>
+      <p class="small">Jalankan dari webserver lokal, bukan langsung <code>file://</code>.</p>
+      <ol class="small">
+        <li>Serve file ini dengan webserver statik lokal (pilih salah satu).</li>
+        <li>
+          Python: <code>python -m http.server 5500</code><br />
+          Node: <code>npx serve . -l 5500</code><br />
+          VS Code: <code>Open with Live Server</code>
+        </li>
+        <li>Buka:
+          <code>http://127.0.0.1:5500/upload_client_demo.html</code>
+        </li>
+        <li>Isi Bearer token, pilih file, lalu upload.</li>
+      </ol>
+      <div id="serveWarning" class="status warn" style="display: none;"></div>
+    </div>
+
+    <div class="layout">
+      <div class="card">
+        <h2>Config & Upload</h2>
+
+        <div class="field">
+          <label>API Base URL</label>
+          <input id="apiBase" value="https://storage.arnatech.id/api" />
+        </div>
+        <div class="field">
+          <label>Bearer Token</label>
+          <input id="token" placeholder="paste access token" />
+        </div>
+        <div class="field">
+          <label>File</label>
+          <input id="fileInput" type="file" />
+        </div>
+        <div class="field">
+          <label>Owner Scope</label>
+          <select id="ownerScope">
+            <option value="user" selected>user</option>
+            <option value="org">org</option>
+          </select>
+        </div>
+        <div class="field">
+          <label>Visibility</label>
+          <select id="visibility">
+            <option value="private" selected>private</option>
+            <option value="org">org</option>
+            <option value="public">public</option>
+            <option value="shared">shared</option>
+          </select>
+        </div>
+        <div class="field">
+          <label>Target Folder ID (optional, kosong = current browser folder/root)</label>
+          <input id="folderId" placeholder="UUID atau kosong" />
+        </div>
+        <div class="field">
+          <label>Concurrency (multipart workers)</label>
+          <input id="concurrency" type="number" min="1" max="8" value="3" />
+        </div>
+
+        <div class="button-row">
+          <button id="btnUpload">Start Upload</button>
+          <button id="btnAbort" class="warn">Abort Current Upload</button>
+        </div>
+
+        <div class="progress-shell">
+          <div id="progressBar" class="progress-bar"></div>
+        </div>
+        <div id="progressText" class="progress-text">0%</div>
+        <div id="status" class="status">Ready.</div>
+        <div id="summary" class="small"></div>
+      </div>
+
+      <div class="card">
+        <h2>File Browser</h2>
+        <div class="browser-toolbar">
+          <button id="btnRoot" class="secondary">Go Root</button>
+          <button id="btnRefresh" class="secondary">Refresh</button>
+          <button id="btnCreateFolder" class="success">Create Folder</button>
+          <input id="newFolderName" placeholder="new folder name" />
+        </div>
+
+        <div id="breadcrumbs" class="breadcrumbs">/</div>
+        <div class="items" id="items"></div>
+      </div>
+    </div>
+
+    <div class="card" style="margin-top: 12px;">
+      <h2>Log</h2>
+      <p class="small">
+        Docstring cepat:
+        1) POST <code>/files/upload</code> untuk inisiasi.
+        2) POST <code>/files/{id}/parts/presign</code> untuk URL part.
+        3) PUT bytes file/chunk langsung ke URL presigned.
+        4) POST <code>/files/{id}/complete</code> kirim part_number + etag.
+      </p>
+      <textarea id="log" readonly></textarea>
+    </div>
+  </div>
+
+  <script>
+    /**
+     * Single-file demo client:
+     * - Upload small file: auto 1 part
+     * - Upload large file: auto multipart
+     * - Real-time progress bar animation
+     * - Root/folder browser navigation
+     * - Folder creation
+     *
+     * Notes:
+     * - File bytes are uploaded to presigned storage URL, not to Django upload endpoint.
+     * - Browser must be served via HTTP origin (not file://) for CORS to work.
+     */
+
+    const state = {
+      currentFileId: null,
+      currentFolderId: null,
+      currentFolderName: "root",
+      breadcrumbs: [{ id: null, name: "root" }],
+    };
+
+    const el = {
+      apiBase: document.getElementById("apiBase"),
+      token: document.getElementById("token"),
+      fileInput: document.getElementById("fileInput"),
+      ownerScope: document.getElementById("ownerScope"),
+      visibility: document.getElementById("visibility"),
+      folderId: document.getElementById("folderId"),
+      concurrency: document.getElementById("concurrency"),
+      btnUpload: document.getElementById("btnUpload"),
+      btnAbort: document.getElementById("btnAbort"),
+      btnRoot: document.getElementById("btnRoot"),
+      btnRefresh: document.getElementById("btnRefresh"),
+      btnCreateFolder: document.getElementById("btnCreateFolder"),
+      newFolderName: document.getElementById("newFolderName"),
+      status: document.getElementById("status"),
+      summary: document.getElementById("summary"),
+      progressBar: document.getElementById("progressBar"),
+      progressText: document.getElementById("progressText"),
+      items: document.getElementById("items"),
+      breadcrumbs: document.getElementById("breadcrumbs"),
+      log: document.getElementById("log"),
+      serveWarning: document.getElementById("serveWarning"),
+    };
+
+    function log(message, data) {
+      const ts = new Date().toISOString();
+      const line = `[${ts}] ${message}`;
+      if (data !== undefined) {
+        el.log.value += `${line}\n${JSON.stringify(data, null, 2)}\n\n`;
+      } else {
+        el.log.value += `${line}\n`;
+      }
+      el.log.scrollTop = el.log.scrollHeight;
+    }
+
+    function setStatus(text, type = "") {
+      el.status.textContent = text;
+      el.status.className = `status ${type}`.trim();
+    }
+
+    function setProgress(percent) {
+      const p = Math.max(0, Math.min(100, percent));
+      el.progressBar.style.width = `${p}%`;
+      el.progressText.textContent = `${p.toFixed(1)}%`;
+    }
+
+    function authHeaders() {
+      return {
+        "Authorization": `Bearer ${el.token.value.trim()}`,
+        "Content-Type": "application/json",
+      };
+    }
+
+    function parseJwtPayload(token) {
+      try {
+        const parts = token.split(".");
+        if (parts.length < 2) return null;
+        const b64 = parts[1].replace(/-/g, "+").replace(/_/g, "/");
+        const json = atob(b64);
+        return JSON.parse(json);
+      } catch {
+        return null;
+      }
+    }
+
+    function ensureOwnerScopeAllowed() {
+      const scope = el.ownerScope.value;
+      if (scope !== "org") return;
+      const payload = parseJwtPayload(el.token.value.trim());
+      if (!payload || !payload.org_id) {
+        throw new Error("owner_scope=org but token has no org_id. Use owner_scope=user or login with org context.");
+      }
+    }
+
+    function baseUrl(path) {
+      return `${el.apiBase.value.replace(/\/+$/, "")}${path}`;
+    }
+
+    async function api(path, method = "GET", body) {
+      const res = await fetch(baseUrl(path), {
+        method,
+        headers: authHeaders(),
+        body: body !== undefined ? JSON.stringify(body) : undefined,
+      });
+      const txt = await res.text();
+      let data = null;
+      try { data = txt ? JSON.parse(txt) : null; } catch { data = txt; }
+      if (!res.ok) {
+        throw new Error(`HTTP ${res.status}: ${typeof data === "string" ? data : JSON.stringify(data)}`);
+      }
+      return data;
+    }
+
+    function putChunk(url, blob, loadedCb) {
+      return new Promise((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        xhr.open("PUT", url, true);
+        xhr.upload.onprogress = (ev) => {
+          if (ev.lengthComputable && loadedCb) loadedCb(ev.loaded, ev.total);
+        };
+        xhr.onload = () => {
+          if (xhr.status >= 200 && xhr.status < 300) {
+            const etag = xhr.getResponseHeader("ETag") || xhr.getResponseHeader("etag");
+            if (!etag) {
+              reject(new Error("Missing ETag header. Pastikan bucket CORS expose ETag."));
+              return;
+            }
+            resolve(etag);
+          } else {
+            reject(new Error(`Part upload failed HTTP ${xhr.status}`));
+          }
+        };
+        xhr.onerror = () => reject(new Error("Network error during part upload."));
+        xhr.send(blob);
+      });
+    }
+
+    function buildParts(totalSize, partSize) {
+      const count = Math.ceil(totalSize / partSize);
+      return Array.from({ length: count }, (_, i) => i + 1);
+    }
+
+    function getChunk(file, partNumber, partSize) {
+      const start = (partNumber - 1) * partSize;
+      const end = Math.min(start + partSize, file.size);
+      return file.slice(start, end);
+    }
+
+    async function uploadParts(file, presignedParts, partSize, concurrency) {
+      const totalBytes = file.size;
+      let uploadedBytes = 0;
+      const etags = new Map();
+      let cursor = 0;
+
+      async function worker(workerId) {
+        while (true) {
+          const idx = cursor++;
+          if (idx >= presignedParts.length) break;
+
+          const part = presignedParts[idx];
+          const chunk = getChunk(file, part.part_number, partSize);
+          let lastLoaded = 0;
+
+          log(`Worker ${workerId} upload part ${part.part_number} (${chunk.size} bytes)`);
+          const etag = await putChunk(part.url, chunk, (loaded) => {
+            const delta = loaded - lastLoaded;
+            lastLoaded = loaded;
+            uploadedBytes += Math.max(0, delta);
+            setProgress((uploadedBytes / totalBytes) * 100);
+          });
+          etags.set(part.part_number, etag);
+        }
+      }
+
+      const jobs = [];
+      for (let i = 1; i <= concurrency; i += 1) jobs.push(worker(i));
+      await Promise.all(jobs);
+
+      return [...etags.entries()]
+        .sort((a, b) => a[0] - b[0])
+        .map(([part_number, etag]) => ({ part_number, etag }));
+    }
+
+    function resolveTargetFolderId() {
+      const manual = el.folderId.value.trim();
+      if (manual) return manual;
+      return state.currentFolderId;
+    }
+
+    async function startUpload() {
+      try {
+        if (!el.token.value.trim()) throw new Error("Bearer token wajib diisi.");
+        ensureOwnerScopeAllowed();
+        const file = el.fileInput.files[0];
+        if (!file) throw new Error("Pilih file dulu.");
+
+        setStatus("Initiating upload...");
+        setProgress(0);
+        const folderId = resolveTargetFolderId();
+        const payload = {
+          size_bytes: file.size,
+          filename: file.name || null,
+          mime_type: file.type || null,
+          owner_scope: el.ownerScope.value,
+          visibility: el.visibility.value,
+          folder_id: folderId || null,
+        };
+        log("POST /files/upload", payload);
+        const initiated = await api("/files/upload", "POST", payload);
+        state.currentFileId = initiated.file_id;
+        log("Initiated", initiated);
+
+        const partSize = initiated.multipart.part_size_bytes;
+        const partNumbers = buildParts(file.size, partSize);
+        const scenario = partNumbers.length === 1 ? "SMALL FILE (single part)" : "LARGE FILE (multipart)";
+        el.summary.textContent = `Scenario: ${scenario}. file_id=${initiated.file_id}. parts=${partNumbers.length}. part_size=${partSize}`;
+
+        setStatus("Requesting presigned URLs...");
+        const presigned = await api(`/files/${initiated.file_id}/parts/presign`, "POST", { parts: partNumbers });
+        log("Presigned", presigned);
+
+        setStatus("Uploading chunks to storage...");
+        const workerCount = Math.max(1, Number(el.concurrency.value || 1));
+        const completeParts = await uploadParts(file, presigned.parts, partSize, workerCount);
+        log("Uploaded parts", completeParts);
+
+        setStatus("Completing upload...");
+        const completeResp = await api(`/files/${initiated.file_id}/complete`, "POST", { parts: completeParts });
+        setProgress(100);
+        setStatus("Upload complete.", "ok");
+        log("Complete response", completeResp);
+
+        await refreshBrowser();
+      } catch (err) {
+        setStatus(`Upload failed: ${err.message}`, "err");
+        log("Upload failed", { error: String(err) });
+      }
+    }
+
+    async function abortUpload() {
+      try {
+        if (!state.currentFileId) throw new Error("Tidak ada upload aktif.");
+        const data = await api(`/files/${state.currentFileId}/abort`, "POST", {});
+        log("Abort response", data);
+        setStatus("Upload aborted.", "warn");
+      } catch (err) {
+        setStatus(`Abort failed: ${err.message}`, "err");
+      }
+    }
+
+    function renderBreadcrumbs() {
+      const html = state.breadcrumbs
+        .map((item, idx) => {
+          const safeName = item.name.replace(/</g, "&lt;");
+          return `<a href="#" data-index="${idx}" class="crumb">${safeName}</a>`;
+        })
+        .join(" / ");
+      el.breadcrumbs.innerHTML = html;
+
+      el.breadcrumbs.querySelectorAll(".crumb").forEach((a) => {
+        a.addEventListener("click", async (ev) => {
+          ev.preventDefault();
+          const idx = Number(a.dataset.index);
+          state.breadcrumbs = state.breadcrumbs.slice(0, idx + 1);
+          const target = state.breadcrumbs[idx];
+          state.currentFolderId = target.id;
+          state.currentFolderName = target.name;
+          await refreshBrowser();
+        });
+      });
+    }
+
+    function renderItems(folders, files) {
+      el.items.innerHTML = "";
+      if (!folders.length && !files.length) {
+        el.items.innerHTML = `<div class="item"><div class="item-name muted">No files/folders</div><div></div><div></div></div>`;
+        return;
+      }
+
+      folders.forEach((folder) => {
+        const row = document.createElement("div");
+        row.className = "item";
+        row.innerHTML = `
+          <div>
+            <div class="item-name">📁 ${folder.name}</div>
+            <div class="item-meta">${folder.id}</div>
+          </div>
+          <div class="item-kind">folder</div>
+          <button class="secondary">Open</button>
+          <div></div>
+        `;
+        row.querySelector("button").addEventListener("click", async () => {
+          state.currentFolderId = folder.id;
+          state.currentFolderName = folder.name;
+          state.breadcrumbs.push({ id: folder.id, name: folder.name });
+          await refreshBrowser();
+        });
+        el.items.appendChild(row);
+      });
+
+      files.forEach((file) => {
+        const row = document.createElement("div");
+        row.className = "item";
+        row.innerHTML = `
+          <div>
+            <div class="item-name">📄 ${file.display_name || file.name || file.id}</div>
+            <div class="item-meta">${file.id || ""}</div>
+          </div>
+          <div class="item-kind">file</div>
+          <a href="${file.url}" target="_blank"><button class="success">Open URL</button></a>
+          <button class="warn">Delete</button>
+        `;
+        row.querySelector(".warn").addEventListener("click", async () => {
+          await deleteFile(file);
+        });
+        el.items.appendChild(row);
+      });
+    }
+
+    async function deleteFile(file) {
+      try {
+        const fileName = file.display_name || file.id;
+        const ok = window.confirm(`Delete file "${fileName}"?\nThis will mark the file as deleted.`);
+        if (!ok) return;
+
+        setStatus("Deleting file...");
+        await api(`/files/${file.id}`, "DELETE");
+        log("Deleted file", { id: file.id, name: fileName });
+        setStatus(`Deleted: ${fileName}`, "ok");
+        await refreshBrowser();
+      } catch (err) {
+        setStatus(`Delete failed: ${err.message}`, "err");
+        log("Delete failed", { error: String(err), file });
+      }
+    }
+
+    async function refreshBrowser() {
+      try {
+        if (!el.token.value.trim()) throw new Error("Bearer token wajib diisi.");
+        setStatus("Loading browser data...");
+        const scope = encodeURIComponent(el.ownerScope.value);
+
+        let data;
+        if (!state.currentFolderId) {
+          data = await api(`/folders/root/children?owner_scope=${scope}`, "GET");
+        } else {
+          data = await api(`/folders/${state.currentFolderId}/children`, "GET");
+        }
+        log("Browser data", data);
+
+        renderBreadcrumbs();
+        renderItems(data.folders || [], data.files || []);
+        setStatus("Browser loaded.", "ok");
+      } catch (err) {
+        setStatus(`Browser load failed: ${err.message}`, "err");
+      }
+    }
+
+    async function createFolder() {
+      try {
+        if (!el.token.value.trim()) throw new Error("Bearer token wajib diisi.");
+        ensureOwnerScopeAllowed();
+
+        const name = el.newFolderName.value.trim();
+        if (!name) throw new Error("Nama folder wajib diisi.");
+
+        const payload = {
+          name,
+          parent: state.currentFolderId || null,
+          owner_scope: el.ownerScope.value,
+        };
+        log("POST /folders", payload);
+        const resp = await api("/folders", "POST", payload);
+        log("Created folder", resp);
+        el.newFolderName.value = "";
+        await refreshBrowser();
+      } catch (err) {
+        setStatus(`Create folder failed: ${err.message}`, "err");
+      }
+    }
+
+    function goRoot() {
+      state.currentFolderId = null;
+      state.currentFolderName = "root";
+      state.breadcrumbs = [{ id: null, name: "root" }];
+      refreshBrowser();
+    }
+
+    function enforceServedFromWebServer() {
+      if (window.location.protocol === "file:") {
+        const msg = "Halaman ini dibuka via file:// . Upload browser ke presigned URL akan gagal. Jalankan lewat webserver lokal (contoh: python -m http.server 5500 / npx serve . -l 5500 / Live Server).";
+        el.serveWarning.style.display = "block";
+        el.serveWarning.textContent = msg;
+        setStatus(msg, "err");
+        log("Invalid run mode", { protocol: window.location.protocol, hint: "Serve this file over http://127.0.0.1:5500" });
+        [el.btnUpload, el.btnAbort, el.btnRefresh, el.btnRoot, el.btnCreateFolder].forEach((btn) => {
+          btn.disabled = true;
+        });
+        return false;
+      }
+      return true;
+    }
+
+    el.btnUpload.addEventListener("click", startUpload);
+    el.btnAbort.addEventListener("click", abortUpload);
+    el.btnRefresh.addEventListener("click", refreshBrowser);
+    el.btnRoot.addEventListener("click", goRoot);
+    el.btnCreateFolder.addEventListener("click", createFolder);
+    el.ownerScope.addEventListener("change", () => goRoot());
+
+    enforceServedFromWebServer();
+  </script>
+</body>
+</html>

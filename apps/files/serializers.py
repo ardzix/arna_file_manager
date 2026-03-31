@@ -4,14 +4,19 @@ from .models import FileAsset, FileStatus, Folder, OwnerScope, Visibility
 
 
 class UploadInitiateSerializer(serializers.Serializer):
-    filename = serializers.CharField(max_length=255)
+    filename = serializers.CharField(max_length=255, required=False, allow_blank=True, allow_null=True)
     size_bytes = serializers.IntegerField(min_value=1)
-    mime_type = serializers.CharField(max_length=255)
-    owner_scope = serializers.ChoiceField(choices=OwnerScope.choices)
-    visibility = serializers.ChoiceField(choices=Visibility.choices, default=Visibility.PRIVATE)
+    mime_type = serializers.CharField(max_length=255, required=False, allow_blank=True, allow_null=True)
+    owner_scope = serializers.ChoiceField(choices=OwnerScope.choices, required=False, default=OwnerScope.USER)
+    visibility = serializers.ChoiceField(choices=Visibility.choices, required=False, default=Visibility.PRIVATE)
     folder_id = serializers.UUIDField(required=False, allow_null=True)
 
     def validate(self, attrs):
+        filename = (attrs.get("filename") or "").strip()
+        mime_type = (attrs.get("mime_type") or "").strip()
+        attrs["filename"] = filename or "unnamed-file"
+        attrs["mime_type"] = mime_type or "application/octet-stream"
+
         owner_scope = attrs["owner_scope"]
         visibility = attrs["visibility"]
         request = self.context["request"]

@@ -4,8 +4,17 @@ from decouple import config
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
+def cast_debug(value):
+    raw = str(value).strip().lower()
+    if raw in {"1", "true", "yes", "on", "dev", "development", "local"}:
+        return True
+    if raw in {"0", "false", "no", "off", "prod", "production", "release"}:
+        return False
+    raise ValueError(f"Invalid DEBUG value: {value}")
+
+
 SECRET_KEY = config("SECRET_KEY", default="dev-only-secret-key")
-DEBUG = config("DEBUG", default=True, cast=bool)
+DEBUG = config("DEBUG", default=True, cast=cast_debug)
 ALLOWED_HOSTS = config("ALLOWED_HOSTS", default="localhost,127.0.0.1").split(",")
 
 INSTALLED_APPS = [
@@ -18,6 +27,7 @@ INSTALLED_APPS = [
     "rest_framework",
     "corsheaders",
     "drf_yasg",
+    "django_extensions",
     "apps.authn",
     "apps.files",
 ]
@@ -39,7 +49,7 @@ ROOT_URLCONF = "config.urls"
 TEMPLATES = [
     {
         "BACKEND": "django.template.backends.django.DjangoTemplates",
-        "DIRS": [],
+        "DIRS": [BASE_DIR / "templates"],
         "APP_DIRS": True,
         "OPTIONS": {
             "context_processors": [
@@ -134,6 +144,7 @@ S3_SECRET_ACCESS_KEY = config("S3_SECRET_ACCESS_KEY", default=None)
 S3_BUCKET_NAME = config("S3_BUCKET_NAME", default="arnatech-files")
 S3_PRESIGN_EXPIRES_SECONDS = config("S3_PRESIGN_EXPIRES_SECONDS", default=900, cast=int)
 S3_DEFAULT_PART_SIZE_BYTES = config("S3_DEFAULT_PART_SIZE_BYTES", default=8 * 1024 * 1024, cast=int)
+S3_HARD_DELETE_ON_FILE_DELETE = config("S3_HARD_DELETE_ON_FILE_DELETE", default=True, cast=bool)
 
 MAX_UPLOAD_SIZE_MB = config("MAX_UPLOAD_SIZE_MB", default=1024, cast=int)
 DATA_UPLOAD_MAX_MEMORY_SIZE = MAX_UPLOAD_SIZE_MB * 1024 * 1024

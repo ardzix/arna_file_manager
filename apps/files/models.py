@@ -108,7 +108,22 @@ class FileAsset(TimestampedModel):
             models.Index(fields=["visibility", "status"]),
         ]
 
+    def _build_stable_url(self) -> str:
+        return f"{settings.STORAGE_PUBLIC_BASE_URL.rstrip('/')}/{self.id}"
+
+    def full_clean(self, exclude=None, validate_unique=True, validate_constraints=True):
+        if not self.stable_url and self.id:
+            self.stable_url = self._build_stable_url()
+        super().full_clean(
+            exclude=exclude,
+            validate_unique=validate_unique,
+            validate_constraints=validate_constraints,
+        )
+
     def clean(self):
+        if not self.stable_url and self.id:
+            self.stable_url = self._build_stable_url()
+
         if self.owner_scope == OwnerScope.USER and not self.owner_user_id:
             raise ValidationError("owner_user_id is required for user scope.")
         if self.owner_scope == OwnerScope.ORG and not self.owner_org_id:
@@ -122,7 +137,7 @@ class FileAsset(TimestampedModel):
 
     def save(self, *args, **kwargs):
         if not self.stable_url:
-            self.stable_url = f"{settings.STORAGE_PUBLIC_BASE_URL.rstrip('/')}/{self.id}"
+            self.stable_url = self._build_stable_url()
         super().save(*args, **kwargs)
 
     def __str__(self) -> str:

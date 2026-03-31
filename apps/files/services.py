@@ -3,6 +3,7 @@ from datetime import timedelta
 
 import boto3
 from botocore.client import BaseClient
+from botocore.exceptions import ClientError
 from django.conf import settings
 from django.utils import timezone
 
@@ -68,12 +69,33 @@ class S3MultipartService:
             return
         self._client().abort_multipart_upload(Bucket=self.bucket, Key=storage_key, UploadId=upload_id)
 
-    def presign_download_url(self, storage_key: str) -> str:
+    def delete_object(self, storage_key: str, version_id: str | None = None) -> None:
+        if not self._enabled():
+            return
+        params = {"Bucket": self.bucket, "Key": storage_key}
+        if version_id:
+            params["VersionId"] = version_id
+        try:
+            self._client().delete_object(**params)
+        except ClientError as exc:
+            code = (exc.response or {}).get("Error", {}).get("Code")
+            # Idempotent behavior: object already missing is treated as success.
+            if code in {"NoSuchKey", "404", "NotFound"}:
+                return
+            raise
+
+    def presign_download_url(self, storage_key: str, mime_type: str | None = None, filename: str | None = None) -> str:
         if not self._enabled():
             return f"https://example.local/download/{storage_key}"
+        params = {"Bucket": self.bucket, "Key": storage_key}
+        if mime_type:
+            params["ResponseContentType"] = mime_type
+        if filename:
+            safe_name = filename.replace('"', "")
+            params["ResponseContentDisposition"] = f'inline; filename="{safe_name}"'
         return self._client().generate_presigned_url(
             ClientMethod="get_object",
-            Params={"Bucket": self.bucket, "Key": storage_key},
+            Params=params,
             ExpiresIn=self.expires_seconds,
         )
 

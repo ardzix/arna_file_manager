@@ -2,6 +2,9 @@ from django.http import HttpResponseRedirect
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from django.conf import settings
+from botocore.exceptions import ClientError
+from drf_yasg import openapi
+from drf_yasg.utils import swagger_auto_schema
 from rest_framework import status
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny, IsAuthenticated
@@ -19,6 +22,23 @@ from .serializers import (
     UploadInitiateSerializer,
 )
 from .services import S3MultipartService
+
+
+OWNER_SCOPE_QUERY_PARAM = openapi.Parameter(
+    "owner_scope",
+    openapi.IN_QUERY,
+    description="Owner scope filter. Defaults to user.",
+    type=openapi.TYPE_STRING,
+    enum=[OwnerScope.USER, OwnerScope.ORG],
+)
+
+FOLDER_ID_QUERY_PARAM = openapi.Parameter(
+    "folder_id",
+    openapi.IN_QUERY,
+    description="Optional folder ID. If omitted, returns files in root.",
+    type=openapi.TYPE_STRING,
+    format=openapi.FORMAT_UUID,
+)
 
 
 def _is_owner(principal, file_obj: FileAsset) -> bool:
@@ -54,6 +74,15 @@ def _check_folder_access(principal, folder: Folder) -> bool:
 class UploadInitiateView(APIView):
     permission_classes = [IsAuthenticated]
 
+    @swagger_auto_schema(
+        operation_summary="Initiate multipart upload",
+        operation_description=(
+            "Create file metadata and initialize multipart upload session. "
+            "Returns immutable file URL, upload_id, and default part_size_bytes."
+        ),
+        request_body=UploadInitiateSerializer,
+        responses={201: openapi.Response("Upload initiated")},
+    )
     def post(self, request):
         serializer = UploadInitiateSerializer(data=request.data, context={"request": request})
         serializer.is_valid(raise_exception=True)
@@ -121,6 +150,15 @@ class UploadInitiateView(APIView):
 class PresignPartsView(APIView):
     permission_classes = [IsAuthenticated]
 
+    @swagger_auto_schema(
+        operation_summary="Get presigned part URLs",
+        operation_description=(
+            "Request presigned URLs for one or more part numbers. "
+            "Client uploads each part directly to object storage via HTTP PUT."
+        ),
+        request_body=PresignPartsSerializer,
+        responses={200: openapi.Response("Presigned URLs returned")},
+    )
     def post(self, request, file_id):
         file_obj = get_object_or_404(FileAsset, id=file_id, deleted_at__isnull=True)
         denied = _check_file_write_access(request.user, file_obj)
@@ -163,6 +201,15 @@ class PresignPartsView(APIView):
 class UploadCompleteView(APIView):
     permission_classes = [IsAuthenticated]
 
+    @swagger_auto_schema(
+        operation_summary="Complete multipart upload",
+        operation_description=(
+            "Finalize multipart upload after all parts are uploaded. "
+            "Payload must include every uploaded part_number with its ETag."
+        ),
+        request_body=CompleteUploadSerializer,
+        responses={200: openapi.Response("Upload completed")},
+    )
     def post(self, request, file_id):
         file_obj = get_object_or_404(FileAsset, id=file_id, deleted_at__isnull=True)
         denied = _check_file_write_access(request.user, file_obj)
@@ -215,6 +262,13 @@ class UploadCompleteView(APIView):
 class UploadAbortView(APIView):
     permission_classes = [IsAuthenticated]
 
+    @swagger_auto_schema(
+        operation_summary="Abort multipart upload",
+        operation_description=(
+            "Abort an in-progress multipart upload and mark file status as aborted."
+        ),
+        responses={200: openapi.Response("Upload aborted")},
+    )
     def post(self, request, file_id):
         file_obj = get_object_or_404(FileAsset, id=file_id, deleted_at__isnull=True)
         denied = _check_file_write_access(request.user, file_obj)
@@ -239,12 +293,28 @@ class UploadAbortView(APIView):
 class FileDetailView(APIView):
     permission_classes = [IsAuthenticated]
 
+    @swagger_auto_schema(
+        operation_summary="Get file metadata",
+        operation_description=(
+            "Read metadata for a single file by file_id. "
+            "Access is checked against owner and visibility policy."
+        ),
+        responses={200: FileSerializer},
+    )
     def get(self, request, file_id):
         file_obj = get_object_or_404(FileAsset, id=file_id, deleted_at__isnull=True)
         if not _can_read(request.user, file_obj):
             return Response({"error": {"code": "permission_denied", "message": "Access denied."}}, status=403)
         return Response(FileSerializer(file_obj).data)
 
+    @swagger_auto_schema(
+        operation_summary="Update file metadata",
+        operation_description=(
+            "Update editable metadata fields (currently display_name and visibility)."
+        ),
+        request_body=FileUpdateSerializer,
+        responses={200: FileSerializer},
+    )
     def patch(self, request, file_id):
         file_obj = get_object_or_404(FileAsset, id=file_id, deleted_at__isnull=True)
         denied = _check_file_write_access(request.user, file_obj)
@@ -256,11 +326,34 @@ class FileDetailView(APIView):
         serializer.save()
         return Response(FileSerializer(file_obj).data)
 
+    @swagger_auto_schema(
+        operation_summary="Delete file",
+        operation_description=(
+            "Delete file metadata and hard-delete object from S3-compatible storage by default."
+        ),
+        responses={204: "Deleted"},
+    )
     def delete(self, request, file_id):
         file_obj = get_object_or_404(FileAsset, id=file_id, deleted_at__isnull=True)
         denied = _check_file_write_access(request.user, file_obj)
         if denied:
             return denied
+
+        if settings.S3_HARD_DELETE_ON_FILE_DELETE:
+            s3 = S3MultipartService()
+            try:
+                s3.delete_object(storage_key=file_obj.storage_key, version_id=file_obj.storage_version_id)
+            except ClientError:
+                return Response(
+                    {
+                        "error": {
+                            "code": "storage_delete_failed",
+                            "message": "Failed to delete file object from storage.",
+                        }
+                    },
+                    status=503,
+                )
+
         file_obj.status = FileStatus.DELETED
         file_obj.deleted_at = timezone.now()
         file_obj.save(update_fields=["status", "deleted_at", "updated_at"])
@@ -270,6 +363,15 @@ class FileDetailView(APIView):
 class FileMoveView(APIView):
     permission_classes = [IsAuthenticated]
 
+    @swagger_auto_schema(
+        operation_summary="Move file to folder",
+        operation_description=(
+            "Move a file into another folder by folder_id. "
+            "This updates metadata only and does not change immutable file URL."
+        ),
+        request_body=FileMoveSerializer,
+        responses={200: openapi.Response("File moved")},
+    )
     def post(self, request, file_id):
         file_obj = get_object_or_404(FileAsset, id=file_id, deleted_at__isnull=True)
         denied = _check_file_write_access(request.user, file_obj)
@@ -288,9 +390,55 @@ class FileMoveView(APIView):
         return Response({"file_id": str(file_obj.id), "folder_id": str(folder.id)})
 
 
+class FileListView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    @swagger_auto_schema(
+        operation_summary="List files from root or folder",
+        operation_description=(
+            "List files filtered by owner_scope and optional folder_id. "
+            "If folder_id is omitted, returns files in root (folder is null)."
+        ),
+        manual_parameters=[OWNER_SCOPE_QUERY_PARAM, FOLDER_ID_QUERY_PARAM],
+        responses={200: FileSerializer(many=True)},
+    )
+    def get(self, request):
+        principal = request.user
+        owner_scope = request.query_params.get("owner_scope", OwnerScope.USER)
+        folder_id = request.query_params.get("folder_id")
+
+        if owner_scope not in {OwnerScope.USER, OwnerScope.ORG}:
+            return Response({"error": {"code": "invalid_owner_scope", "message": "owner_scope must be user or org."}}, status=400)
+        if owner_scope == OwnerScope.ORG and not principal.org_id:
+            return Response({"error": {"code": "invalid_owner_scope", "message": "org_id is required for org scope."}}, status=400)
+
+        files = FileAsset.objects.filter(deleted_at__isnull=True).exclude(status=FileStatus.DELETED)
+        if owner_scope == OwnerScope.USER:
+            files = files.filter(owner_scope=OwnerScope.USER, owner_user_id=principal.user_id)
+        else:
+            files = files.filter(owner_scope=OwnerScope.ORG, owner_org_id=principal.org_id)
+
+        if folder_id:
+            files = files.filter(folder_id=folder_id)
+        else:
+            files = files.filter(folder__isnull=True)
+
+        files = files.order_by("display_name")
+        return Response(FileSerializer(files, many=True).data)
+
+
 class FolderCreateView(APIView):
     permission_classes = [IsAuthenticated]
 
+    @swagger_auto_schema(
+        operation_summary="Create folder",
+        operation_description=(
+            "Create a folder in current owner scope. "
+            "Use parent field for nested folder; null means create in root."
+        ),
+        request_body=FolderCreateSerializer,
+        responses={201: FolderCreateSerializer},
+    )
     def post(self, request):
         serializer = FolderCreateSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -313,6 +461,13 @@ class FolderCreateView(APIView):
 class FolderChildrenView(APIView):
     permission_classes = [IsAuthenticated]
 
+    @swagger_auto_schema(
+        operation_summary="List folders and files inside folder",
+        operation_description=(
+            "List direct children (folders and files) inside a specific folder."
+        ),
+        responses={200: openapi.Response("Folder children returned")},
+    )
     def get(self, request, folder_id):
         folder = get_object_or_404(Folder, id=folder_id, deleted_at__isnull=True)
         if not _check_folder_access(request.user, folder):
@@ -329,13 +484,87 @@ class FolderChildrenView(APIView):
         )
 
 
-@api_view(["GET"])
-@permission_classes([AllowAny])
-def file_resolve_view(request, file_id):
-    file_obj = get_object_or_404(FileAsset, id=file_id, deleted_at__isnull=True)
-    principal = getattr(request, "user", None)
-    if not _can_read(principal, file_obj):
-        return Response({"error": {"code": "permission_denied", "message": "Access denied."}}, status=403)
+class RootChildrenView(APIView):
+    permission_classes = [IsAuthenticated]
 
-    s3 = S3MultipartService()
-    return HttpResponseRedirect(redirect_to=s3.presign_download_url(file_obj.storage_key))
+    @swagger_auto_schema(
+        operation_summary="List root folders and files",
+        operation_description=(
+            "List top-level folders and files for selected owner_scope."
+        ),
+        manual_parameters=[OWNER_SCOPE_QUERY_PARAM],
+        responses={200: openapi.Response("Root children returned")},
+    )
+    def get(self, request):
+        principal = request.user
+        owner_scope = request.query_params.get("owner_scope", OwnerScope.USER)
+
+        if owner_scope not in {OwnerScope.USER, OwnerScope.ORG}:
+            return Response({"error": {"code": "invalid_owner_scope", "message": "owner_scope must be user or org."}}, status=400)
+        if owner_scope == OwnerScope.ORG and not principal.org_id:
+            return Response({"error": {"code": "invalid_owner_scope", "message": "org_id is required for org scope."}}, status=400)
+
+        folders = Folder.objects.filter(parent__isnull=True, deleted_at__isnull=True)
+        files = FileAsset.objects.filter(folder__isnull=True, deleted_at__isnull=True).exclude(status=FileStatus.DELETED)
+        if owner_scope == OwnerScope.USER:
+            folders = folders.filter(owner_scope=OwnerScope.USER, owner_user_id=principal.user_id)
+            files = files.filter(owner_scope=OwnerScope.USER, owner_user_id=principal.user_id)
+        else:
+            folders = folders.filter(owner_scope=OwnerScope.ORG, owner_org_id=principal.org_id)
+            files = files.filter(owner_scope=OwnerScope.ORG, owner_org_id=principal.org_id)
+
+        folders = folders.order_by("name")
+        files = files.order_by("display_name")
+        return Response(
+            {
+                "folder": None,
+                "folders": [{"id": str(item.id), "name": item.name} for item in folders],
+                "files": [{"id": str(item.id), "display_name": item.display_name, "url": item.stable_url} for item in files],
+            }
+        )
+
+
+class FileResolveView(APIView):
+    permission_classes = [AllowAny]
+
+    @swagger_auto_schema(
+        operation_summary="Resolve stable file URL",
+        operation_description=(
+            "Default behavior is HTTP 302 redirect to a short-lived presigned download URL. "
+            "If request Accept header contains application/json (for example from Swagger UI), "
+            "this endpoint returns JSON with the generated download URL instead of redirect."
+        ),
+        responses={
+            200: openapi.Response(
+                "JSON response for API clients/Swagger",
+                schema=openapi.Schema(
+                    type=openapi.TYPE_OBJECT,
+                    properties={
+                        "file_id": openapi.Schema(type=openapi.TYPE_STRING, format=openapi.FORMAT_UUID),
+                        "download_url": openapi.Schema(type=openapi.TYPE_STRING, format=openapi.FORMAT_URI),
+                    },
+                ),
+            ),
+            302: "Redirect to presigned download URL",
+            403: "Access denied",
+            404: "Not found",
+        },
+    )
+    def get(self, request, file_id):
+        file_obj = get_object_or_404(FileAsset, id=file_id, deleted_at__isnull=True)
+        principal = getattr(request, "user", None)
+        if not _can_read(principal, file_obj):
+            return Response({"error": {"code": "permission_denied", "message": "Access denied."}}, status=403)
+
+        s3 = S3MultipartService()
+        download_url = s3.presign_download_url(
+            storage_key=file_obj.storage_key,
+            mime_type=file_obj.mime_type,
+            filename=file_obj.display_name or file_obj.original_name,
+        )
+
+        accept_header = request.META.get("HTTP_ACCEPT", "")
+        if "application/json" in accept_header:
+            return Response({"file_id": str(file_obj.id), "download_url": download_url})
+
+        return HttpResponseRedirect(redirect_to=download_url)

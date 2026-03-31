@@ -2,8 +2,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import jwt
 from django.conf import settings
+from jose import jwt
+from jose.exceptions import ExpiredSignatureError, JWTError
 from rest_framework import authentication
 from rest_framework.exceptions import AuthenticationFailed
 
@@ -48,9 +49,9 @@ class SSOJWTAuthentication(authentication.BaseAuthentication):
                 algorithms=[settings.JWT_ALGORITHM],
                 options={"verify_aud": False},
             )
-        except jwt.ExpiredSignatureError as exc:
+        except ExpiredSignatureError as exc:
             raise AuthenticationFailed("Token expired.") from exc
-        except jwt.InvalidTokenError as exc:
+        except JWTError as exc:
             raise AuthenticationFailed("Invalid token.") from exc
 
         if payload.get("token_type") != "access":
