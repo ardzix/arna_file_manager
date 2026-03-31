@@ -40,6 +40,75 @@ FOLDER_ID_QUERY_PARAM = openapi.Parameter(
     format=openapi.FORMAT_UUID,
 )
 
+UPLOAD_INIT_RESPONSE_SCHEMA = openapi.Schema(
+    type=openapi.TYPE_OBJECT,
+    properties={
+        "file_id": openapi.Schema(type=openapi.TYPE_STRING, format=openapi.FORMAT_UUID),
+        "url": openapi.Schema(type=openapi.TYPE_STRING, format=openapi.FORMAT_URI),
+        "status": openapi.Schema(type=openapi.TYPE_STRING),
+        "multipart": openapi.Schema(
+            type=openapi.TYPE_OBJECT,
+            properties={
+                "upload_id": openapi.Schema(type=openapi.TYPE_STRING),
+                "part_size_bytes": openapi.Schema(type=openapi.TYPE_INTEGER),
+                "expires_at": openapi.Schema(type=openapi.TYPE_STRING, format=openapi.FORMAT_DATETIME),
+            },
+        ),
+    },
+    example={
+        "file_id": "5f99b2be-6dd1-4a90-bef7-412f77ec2f49",
+        "url": "https://storage.arnatech.id/5f99b2be-6dd1-4a90-bef7-412f77ec2f49",
+        "status": "upload_pending",
+        "multipart": {
+            "upload_id": "abc123-upload-id",
+            "part_size_bytes": 8388608,
+            "expires_at": "2026-03-31T05:00:00Z",
+        },
+    },
+)
+
+PRESIGN_RESPONSE_SCHEMA = openapi.Schema(
+    type=openapi.TYPE_OBJECT,
+    properties={
+        "file_id": openapi.Schema(type=openapi.TYPE_STRING, format=openapi.FORMAT_UUID),
+        "parts": openapi.Schema(
+            type=openapi.TYPE_ARRAY,
+            items=openapi.Schema(
+                type=openapi.TYPE_OBJECT,
+                properties={
+                    "part_number": openapi.Schema(type=openapi.TYPE_INTEGER),
+                    "url": openapi.Schema(type=openapi.TYPE_STRING, format=openapi.FORMAT_URI),
+                },
+            ),
+        ),
+    },
+    example={
+        "file_id": "5f99b2be-6dd1-4a90-bef7-412f77ec2f49",
+        "parts": [
+            {"part_number": 1, "url": "https://ap-south-1.linodeobjects.com/..."},
+            {"part_number": 2, "url": "https://ap-south-1.linodeobjects.com/..."},
+        ],
+    },
+)
+
+COMPLETE_RESPONSE_SCHEMA = openapi.Schema(
+    type=openapi.TYPE_OBJECT,
+    properties={
+        "file_id": openapi.Schema(type=openapi.TYPE_STRING, format=openapi.FORMAT_UUID),
+        "url": openapi.Schema(type=openapi.TYPE_STRING, format=openapi.FORMAT_URI),
+        "status": openapi.Schema(type=openapi.TYPE_STRING),
+        "size_bytes": openapi.Schema(type=openapi.TYPE_INTEGER),
+        "mime_type": openapi.Schema(type=openapi.TYPE_STRING),
+    },
+    example={
+        "file_id": "5f99b2be-6dd1-4a90-bef7-412f77ec2f49",
+        "url": "https://storage.arnatech.id/5f99b2be-6dd1-4a90-bef7-412f77ec2f49",
+        "status": "active",
+        "size_bytes": 5242880,
+        "mime_type": "image/png",
+    },
+)
+
 
 def _is_owner(principal, file_obj: FileAsset) -> bool:
     if file_obj.owner_scope == OwnerScope.USER:
@@ -75,13 +144,24 @@ class UploadInitiateView(APIView):
     permission_classes = [IsAuthenticated]
 
     @swagger_auto_schema(
-        operation_summary="Initiate multipart upload",
+        tags=["Upload Workflow"],
+        operation_summary="Step 1: Initiate Upload",
         operation_description=(
-            "Create file metadata and initialize multipart upload session. "
-            "Returns immutable file URL, upload_id, and default part_size_bytes."
+            "Create file metadata and initialize multipart upload session.\n\n"
+            "This endpoint does **not** upload file bytes. It only prepares upload state and returns:\n"
+            "1. `file_id`\n"
+            "2. immutable public URL (`url`)\n"
+            "3. `multipart.upload_id` and `part_size_bytes`\n\n"
+            "After this call, continue to **Step 2: POST /api/files/{file_id}/parts/presign**.\n\n"
+            "Full upload sequence summary:\n"
+            "1. Call this endpoint.\n"
+            "2. Call Step 2 to get presigned URLs for part numbers.\n"
+            "3. Upload each chunk/file bytes to each returned URL using HTTP PUT.\n"
+            "4. Collect `ETag` from each PUT response header.\n"
+            "5. Call Step 3 `/api/files/{file_id}/complete` with `{part_number, etag}` list."
         ),
         request_body=UploadInitiateSerializer,
-        responses={201: openapi.Response("Upload initiated")},
+        responses={201: openapi.Response("Upload initiated", schema=UPLOAD_INIT_RESPONSE_SCHEMA)},
     )
     def post(self, request):
         serializer = UploadInitiateSerializer(data=request.data, context={"request": request})
@@ -151,13 +231,40 @@ class PresignPartsView(APIView):
     permission_classes = [IsAuthenticated]
 
     @swagger_auto_schema(
-        operation_summary="Get presigned part URLs",
+        tags=["Upload Workflow"],
+        operation_summary="Step 2: Get Presigned Part URLs",
         operation_description=(
-            "Request presigned URLs for one or more part numbers. "
-            "Client uploads each part directly to object storage via HTTP PUT."
+            "Request presigned URLs for one or more part numbers.\n\n"
+            "Then upload each part directly to storage using HTTP `PUT` to each returned URL.\n"
+            "Collect the `ETag` from each upload response header.\n\n"
+            "After all parts are uploaded, continue to **Step 3: POST /api/files/{file_id}/complete**.\n\n"
+            "How to upload to S3-compatible URL and read ETag:\n"
+            "1. For each item in response `parts[]`, take `part_number` and `url`.\n"
+            "2. Send HTTP `PUT` to that `url` with body = chunk bytes.\n"
+            "3. Read `ETag` from response header.\n"
+            "4. Build final payload:\n"
+            "   `{\"parts\": [{\"part_number\": 1, \"etag\": \"\\\"...\\\"\"}, ...]}`\n"
+            "5. Send payload to Step 3 complete endpoint.\n\n"
+            "Browser JavaScript example:\n"
+            "```js\n"
+            "// `file` comes from <input type=\"file\"> e.g. const file = input.files[0]\n"
+            "const partSize = 8 * 1024 * 1024; // use multipart.part_size_bytes from Step 1 response\n"
+            "const partNumber = 1;\n"
+            "const start = (partNumber - 1) * partSize;\n"
+            "const end = Math.min(start + partSize, file.size);\n"
+            "const chunkBlob = file.slice(start, end); // <-- chunkBlob for this part\n"
+            "\n"
+            "const res = await fetch(presignedUrl, { method: 'PUT', body: chunkBlob });\n"
+            "const etag = res.headers.get('ETag') || res.headers.get('etag');\n"
+            "```\n\n"
+            "curl example:\n"
+            "```bash\n"
+            "curl -i -X PUT \"<presigned_url>\" --data-binary \"@part-1.bin\"\n"
+            "# Copy ETag header value from response, then call complete endpoint.\n"
+            "```"
         ),
         request_body=PresignPartsSerializer,
-        responses={200: openapi.Response("Presigned URLs returned")},
+        responses={200: openapi.Response("Presigned URLs returned", schema=PRESIGN_RESPONSE_SCHEMA)},
     )
     def post(self, request, file_id):
         file_obj = get_object_or_404(FileAsset, id=file_id, deleted_at__isnull=True)
@@ -202,13 +309,15 @@ class UploadCompleteView(APIView):
     permission_classes = [IsAuthenticated]
 
     @swagger_auto_schema(
-        operation_summary="Complete multipart upload",
+        tags=["Upload Workflow"],
+        operation_summary="Step 3: Complete Upload",
         operation_description=(
-            "Finalize multipart upload after all parts are uploaded. "
-            "Payload must include every uploaded part_number with its ETag."
+            "Finalize multipart upload after all parts are uploaded.\n\n"
+            "Payload must include all uploaded parts with exact `part_number` and `etag` values.\n"
+            "On success, file status becomes `active` and URL is ready to use."
         ),
         request_body=CompleteUploadSerializer,
-        responses={200: openapi.Response("Upload completed")},
+        responses={200: openapi.Response("Upload completed", schema=COMPLETE_RESPONSE_SCHEMA)},
     )
     def post(self, request, file_id):
         file_obj = get_object_or_404(FileAsset, id=file_id, deleted_at__isnull=True)
@@ -263,9 +372,11 @@ class UploadAbortView(APIView):
     permission_classes = [IsAuthenticated]
 
     @swagger_auto_schema(
-        operation_summary="Abort multipart upload",
+        tags=["Upload Workflow"],
+        operation_summary="Optional: Abort Upload",
         operation_description=(
-            "Abort an in-progress multipart upload and mark file status as aborted."
+            "Abort an in-progress multipart upload and mark file status as `aborted`.\n\n"
+            "Use this when user cancels upload or upload process fails."
         ),
         responses={200: openapi.Response("Upload aborted")},
     )

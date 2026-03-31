@@ -331,6 +331,22 @@
       breadcrumbs: [{ id: null, name: "root" }],
     };
 
+    /**
+     * Backend endpoint paths (relative to API base URL).
+     * Keep this map in sync with apps/files/urls.py.
+     */
+    const API_PATHS = {
+      filesList: "/files",
+      uploadInitiate: "/files/upload",
+      uploadPresign: (fileId) => `/files/${fileId}/parts/presign`,
+      uploadComplete: (fileId) => `/files/${fileId}/complete`,
+      uploadAbort: (fileId) => `/files/${fileId}/abort`,
+      fileDelete: (fileId) => `/files/${fileId}`,
+      rootChildren: "/folders/root/children",
+      folderChildren: (folderId) => `/folders/${folderId}/children`,
+      folderCreate: "/folders",
+    };
+
     const el = {
       apiBase: document.getElementById("apiBase"),
       token: document.getElementById("token"),
@@ -518,8 +534,8 @@
           visibility: el.visibility.value,
           folder_id: folderId || null,
         };
-        log("POST /files/upload", payload);
-        const initiated = await api("/files/upload", "POST", payload);
+        log(`POST ${API_PATHS.uploadInitiate}`, payload);
+        const initiated = await api(API_PATHS.uploadInitiate, "POST", payload);
         state.currentFileId = initiated.file_id;
         log("Initiated", initiated);
 
@@ -529,7 +545,7 @@
         el.summary.textContent = `Scenario: ${scenario}. file_id=${initiated.file_id}. parts=${partNumbers.length}. part_size=${partSize}`;
 
         setStatus("Requesting presigned URLs...");
-        const presigned = await api(`/files/${initiated.file_id}/parts/presign`, "POST", { parts: partNumbers });
+        const presigned = await api(API_PATHS.uploadPresign(initiated.file_id), "POST", { parts: partNumbers });
         log("Presigned", presigned);
 
         setStatus("Uploading chunks to storage...");
@@ -538,7 +554,7 @@
         log("Uploaded parts", completeParts);
 
         setStatus("Completing upload...");
-        const completeResp = await api(`/files/${initiated.file_id}/complete`, "POST", { parts: completeParts });
+        const completeResp = await api(API_PATHS.uploadComplete(initiated.file_id), "POST", { parts: completeParts });
         setProgress(100);
         setStatus("Upload complete.", "ok");
         log("Complete response", completeResp);
@@ -553,7 +569,7 @@
     async function abortUpload() {
       try {
         if (!state.currentFileId) throw new Error("Tidak ada upload aktif.");
-        const data = await api(`/files/${state.currentFileId}/abort`, "POST", {});
+        const data = await api(API_PATHS.uploadAbort(state.currentFileId), "POST", {});
         log("Abort response", data);
         setStatus("Upload aborted.", "warn");
       } catch (err) {
@@ -637,7 +653,7 @@
         if (!ok) return;
 
         setStatus("Deleting file...");
-        await api(`/files/${file.id}`, "DELETE");
+        await api(API_PATHS.fileDelete(file.id), "DELETE");
         log("Deleted file", { id: file.id, name: fileName });
         setStatus(`Deleted: ${fileName}`, "ok");
         await refreshBrowser();
@@ -655,9 +671,9 @@
 
         let data;
         if (!state.currentFolderId) {
-          data = await api(`/folders/root/children?owner_scope=${scope}`, "GET");
+          data = await api(`${API_PATHS.rootChildren}?owner_scope=${scope}`, "GET");
         } else {
-          data = await api(`/folders/${state.currentFolderId}/children`, "GET");
+          data = await api(API_PATHS.folderChildren(state.currentFolderId), "GET");
         }
         log("Browser data", data);
 
@@ -682,8 +698,8 @@
           parent: state.currentFolderId || null,
           owner_scope: el.ownerScope.value,
         };
-        log("POST /folders", payload);
-        const resp = await api("/folders", "POST", payload);
+        log(`POST ${API_PATHS.folderCreate}`, payload);
+        const resp = await api(API_PATHS.folderCreate, "POST", payload);
         log("Created folder", resp);
         el.newFolderName.value = "";
         await refreshBrowser();
