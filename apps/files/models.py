@@ -8,6 +8,7 @@ from django.db import models
 class OwnerScope(models.TextChoices):
     USER = "user", "User"
     ORG = "org", "Organization"
+    SERVICE = "service", "Service"
 
 
 class Visibility(models.TextChoices):
@@ -80,7 +81,9 @@ class FileAsset(TimestampedModel):
     owner_scope = models.CharField(max_length=10, choices=OwnerScope.choices)
     owner_user_id = models.UUIDField(null=True, blank=True)
     owner_org_id = models.UUIDField(null=True, blank=True)
-    created_by_user_id = models.UUIDField()
+    owner_service_id = models.UUIDField(null=True, blank=True)
+    created_by_user_id = models.UUIDField(null=True, blank=True)
+    created_by_service_id = models.UUIDField(null=True, blank=True)
 
     visibility = models.CharField(max_length=10, choices=Visibility.choices, default=Visibility.PRIVATE)
     status = models.CharField(max_length=20, choices=FileStatus.choices, default=FileStatus.UPLOAD_PENDING)
@@ -104,6 +107,7 @@ class FileAsset(TimestampedModel):
         indexes = [
             models.Index(fields=["owner_scope", "owner_user_id", "status"]),
             models.Index(fields=["owner_scope", "owner_org_id", "status"]),
+            models.Index(fields=["owner_scope", "owner_service_id", "status"]),
             models.Index(fields=["folder", "status"]),
             models.Index(fields=["visibility", "status"]),
         ]
@@ -128,10 +132,14 @@ class FileAsset(TimestampedModel):
             raise ValidationError("owner_user_id is required for user scope.")
         if self.owner_scope == OwnerScope.ORG and not self.owner_org_id:
             raise ValidationError("owner_org_id is required for org scope.")
+        if self.owner_scope == OwnerScope.SERVICE and not self.owner_service_id:
+            raise ValidationError("owner_service_id is required for service scope.")
         if self.owner_scope == OwnerScope.USER and self.owner_org_id:
             raise ValidationError("owner_org_id must be null for user scope.")
         if self.owner_scope == OwnerScope.ORG and self.owner_user_id:
             raise ValidationError("owner_user_id must be null for org scope.")
+        if self.owner_scope != OwnerScope.SERVICE and self.owner_service_id:
+            raise ValidationError("owner_service_id is only valid for service scope.")
         if self.visibility == Visibility.ORG and self.owner_scope != OwnerScope.ORG:
             raise ValidationError("org visibility is only valid for org-owned files.")
 
@@ -173,3 +181,16 @@ class MultipartUploadPart(models.Model):
 
     def __str__(self) -> str:
         return f"{self.multipart_upload_id}:{self.part_number}"
+
+
+class FileShare(TimestampedModel):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    file = models.ForeignKey(FileAsset, on_delete=models.CASCADE, related_name="shares")
+    token_hash = models.CharField(max_length=64, unique=True)
+    expires_at = models.DateTimeField()
+    revoked_at = models.DateTimeField(null=True, blank=True)
+    created_by_user_id = models.UUIDField(null=True, blank=True)
+    created_by_service_id = models.UUIDField(null=True, blank=True)
+
+    class Meta:
+        indexes = [models.Index(fields=["token_hash", "expires_at", "revoked_at"])]

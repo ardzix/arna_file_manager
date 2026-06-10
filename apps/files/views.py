@@ -1,3 +1,7 @@
+import hashlib
+import secrets
+from datetime import timedelta
+
 from django.http import HttpResponseRedirect
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
@@ -11,12 +15,13 @@ from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from .models import FileAsset, FileStatus, Folder, MultipartStatus, MultipartUpload, MultipartUploadPart, OwnerScope, Visibility
+from .models import FileAsset, FileShare, FileStatus, Folder, MultipartStatus, MultipartUpload, MultipartUploadPart, OwnerScope, Visibility
 from .serializers import (
     CompleteUploadSerializer,
     FileMoveSerializer,
     FileSerializer,
     FileUpdateSerializer,
+    FileShareCreateSerializer,
     FolderCreateSerializer,
     PresignPartsSerializer,
     UploadInitiateSerializer,
@@ -113,7 +118,15 @@ COMPLETE_RESPONSE_SCHEMA = openapi.Schema(
 def _is_owner(principal, file_obj: FileAsset) -> bool:
     if file_obj.owner_scope == OwnerScope.USER:
         return str(file_obj.owner_user_id) == str(principal.user_id)
-    return str(file_obj.owner_org_id) == str(principal.org_id)
+    if file_obj.owner_scope == OwnerScope.ORG:
+        return str(file_obj.owner_org_id) == str(principal.org_id)
+    return str(file_obj.owner_service_id) == str(principal.service_id)
+
+
+def _service_scope_denied(principal, required_scope):
+    if principal.principal_type == "service" and required_scope not in principal.scopes:
+        return Response({"error": {"code": "permission_denied", "message": f"Missing scope: {required_scope}"}}, status=403)
+    return None
 
 
 def _can_read(principal, file_obj: FileAsset) -> bool:
@@ -164,6 +177,9 @@ class UploadInitiateView(APIView):
         responses={201: openapi.Response("Upload initiated", schema=UPLOAD_INIT_RESPONSE_SCHEMA)},
     )
     def post(self, request):
+        denied = _service_scope_denied(request.user, "storage.files.create")
+        if denied:
+            return denied
         serializer = UploadInitiateSerializer(data=request.data, context={"request": request})
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
@@ -171,7 +187,11 @@ class UploadInitiateView(APIView):
         principal = request.user
         file_id = FileAsset._meta.get_field("id").default()
         owner_scope = data["owner_scope"]
-        owner_id = principal.user_id if owner_scope == OwnerScope.USER else principal.org_id
+        owner_id = {
+            OwnerScope.USER: principal.user_id,
+            OwnerScope.ORG: principal.org_id,
+            OwnerScope.SERVICE: principal.service_id,
+        }[owner_scope]
 
         s3 = S3MultipartService()
         storage_key = s3.create_storage_key(owner_scope=owner_scope, owner_id=str(owner_id), file_id=file_id)
@@ -190,7 +210,9 @@ class UploadInitiateView(APIView):
             owner_scope=owner_scope,
             owner_user_id=principal.user_id if owner_scope == OwnerScope.USER else None,
             owner_org_id=principal.org_id if owner_scope == OwnerScope.ORG else None,
-            created_by_user_id=principal.user_id,
+            owner_service_id=principal.service_id if owner_scope == OwnerScope.SERVICE else None,
+            created_by_user_id=principal.user_id if principal.principal_type == "user" else None,
+            created_by_service_id=principal.service_id if principal.principal_type == "service" else None,
             visibility=data["visibility"],
             status=FileStatus.UPLOAD_PENDING,
             original_name=data["filename"],
@@ -413,6 +435,9 @@ class FileDetailView(APIView):
         responses={200: FileSerializer},
     )
     def get(self, request, file_id):
+        denied = _service_scope_denied(request.user, "storage.files.read")
+        if denied:
+            return denied
         file_obj = get_object_or_404(FileAsset, id=file_id, deleted_at__isnull=True)
         if not _can_read(request.user, file_obj):
             return Response({"error": {"code": "permission_denied", "message": "Access denied."}}, status=403)
@@ -445,6 +470,9 @@ class FileDetailView(APIView):
         responses={204: "Deleted"},
     )
     def delete(self, request, file_id):
+        denied = _service_scope_denied(request.user, "storage.files.delete")
+        if denied:
+            return denied
         file_obj = get_object_or_404(FileAsset, id=file_id, deleted_at__isnull=True)
         denied = _check_file_write_access(request.user, file_obj)
         if denied:
@@ -515,19 +543,24 @@ class FileListView(APIView):
     )
     def get(self, request):
         principal = request.user
+        denied = _service_scope_denied(principal, "storage.files.read")
+        if denied:
+            return denied
         owner_scope = request.query_params.get("owner_scope", OwnerScope.USER)
         folder_id = request.query_params.get("folder_id")
 
-        if owner_scope not in {OwnerScope.USER, OwnerScope.ORG}:
-            return Response({"error": {"code": "invalid_owner_scope", "message": "owner_scope must be user or org."}}, status=400)
+        if owner_scope not in {OwnerScope.USER, OwnerScope.ORG, OwnerScope.SERVICE}:
+            return Response({"error": {"code": "invalid_owner_scope", "message": "Invalid owner_scope."}}, status=400)
         if owner_scope == OwnerScope.ORG and not principal.org_id:
             return Response({"error": {"code": "invalid_owner_scope", "message": "org_id is required for org scope."}}, status=400)
 
         files = FileAsset.objects.filter(deleted_at__isnull=True).exclude(status=FileStatus.DELETED)
         if owner_scope == OwnerScope.USER:
             files = files.filter(owner_scope=OwnerScope.USER, owner_user_id=principal.user_id)
-        else:
+        elif owner_scope == OwnerScope.ORG:
             files = files.filter(owner_scope=OwnerScope.ORG, owner_org_id=principal.org_id)
+        else:
+            files = files.filter(owner_scope=OwnerScope.SERVICE, owner_service_id=principal.service_id)
 
         if folder_id:
             files = files.filter(folder_id=folder_id)
@@ -556,6 +589,8 @@ class FolderCreateView(APIView):
 
         owner_scope = serializer.validated_data["owner_scope"]
         principal = request.user
+        if owner_scope == OwnerScope.SERVICE:
+            return Response({"error": {"code": "invalid_owner_scope", "message": "Service folders are not supported."}}, status=400)
         owner_user_id = principal.user_id if owner_scope == OwnerScope.USER else None
         owner_org_id = principal.org_id if owner_scope == OwnerScope.ORG else None
         if owner_scope == OwnerScope.ORG and not owner_org_id:
@@ -678,4 +713,79 @@ class FileResolveView(APIView):
         if "application/json" in accept_header:
             return Response({"file_id": str(file_obj.id), "download_url": download_url})
 
+        return HttpResponseRedirect(redirect_to=download_url)
+
+
+class FileShareCreateView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, file_id):
+        denied = _service_scope_denied(request.user, "storage.files.share")
+        if denied:
+            return denied
+        file_obj = get_object_or_404(FileAsset, id=file_id, deleted_at__isnull=True, status=FileStatus.ACTIVE)
+        denied = _check_file_write_access(request.user, file_obj)
+        if denied:
+            return denied
+        serializer = FileShareCreateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        raw_token = secrets.token_urlsafe(32)
+        share = FileShare.objects.create(
+            file=file_obj,
+            token_hash=hashlib.sha256(raw_token.encode("utf-8")).hexdigest(),
+            expires_at=timezone.now() + timedelta(days=serializer.validated_data["expires_in_days"]),
+            created_by_user_id=request.user.user_id if request.user.principal_type == "user" else None,
+            created_by_service_id=request.user.service_id if request.user.principal_type == "service" else None,
+        )
+        if file_obj.visibility != Visibility.SHARED:
+            file_obj.visibility = Visibility.SHARED
+            file_obj.save(update_fields=["visibility", "updated_at"])
+        return Response(
+            {
+                "share_id": str(share.id),
+                "url": f"{settings.STORAGE_PUBLIC_BASE_URL.rstrip('/')}/s/{raw_token}",
+                "expires_at": share.expires_at,
+            },
+            status=201,
+        )
+
+
+class FileShareRevokeView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def delete(self, request, file_id, share_id):
+        denied = _service_scope_denied(request.user, "storage.files.share")
+        if denied:
+            return denied
+        file_obj = get_object_or_404(FileAsset, id=file_id, deleted_at__isnull=True)
+        denied = _check_file_write_access(request.user, file_obj)
+        if denied:
+            return denied
+        share = get_object_or_404(FileShare, id=share_id, file=file_obj)
+        share.revoked_at = timezone.now()
+        share.save(update_fields=["revoked_at", "updated_at"])
+        return Response(status=204)
+
+
+class FileShareResolveView(APIView):
+    authentication_classes = []
+    permission_classes = [AllowAny]
+
+    def get(self, request, token):
+        token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+        share = get_object_or_404(
+            FileShare.objects.select_related("file"),
+            token_hash=token_hash,
+            revoked_at__isnull=True,
+            expires_at__gt=timezone.now(),
+            file__status=FileStatus.ACTIVE,
+            file__visibility=Visibility.SHARED,
+            file__deleted_at__isnull=True,
+        )
+        file_obj = share.file
+        download_url = S3MultipartService().presign_download_url(
+            storage_key=file_obj.storage_key,
+            mime_type=file_obj.mime_type,
+            filename=file_obj.display_name or file_obj.original_name,
+        )
         return HttpResponseRedirect(redirect_to=download_url)

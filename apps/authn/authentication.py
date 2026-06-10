@@ -11,11 +11,14 @@ from rest_framework.exceptions import AuthenticationFailed
 
 @dataclass
 class TokenPrincipal:
-    user_id: str
+    principal_type: str
+    user_id: str | None
+    service_id: str | None
     org_id: str | None
     org_name: str | None
     roles: list[str]
     permissions: list[str]
+    scopes: list[str]
     is_owner: bool
     claims: dict[str, Any]
 
@@ -57,16 +60,24 @@ class SSOJWTAuthentication(authentication.BaseAuthentication):
         if payload.get("token_type") != "access":
             raise AuthenticationFailed("Invalid token type.")
 
+        principal_type = payload.get("principal_type", "user")
         user_id = payload.get("user_id")
-        if not user_id:
+        service_id = payload.get("service_id")
+        if principal_type == "service":
+            if not service_id or payload.get("aud") != "storage":
+                raise AuthenticationFailed("Invalid service principal.")
+        elif not user_id:
             raise AuthenticationFailed("Missing user_id claim.")
 
         principal = TokenPrincipal(
-            user_id=str(user_id),
+            principal_type=principal_type,
+            user_id=str(user_id) if user_id else None,
+            service_id=str(service_id) if service_id else None,
             org_id=payload.get("org_id"),
             org_name=payload.get("org_name"),
             roles=payload.get("roles", []),
             permissions=payload.get("permissions", []),
+            scopes=payload.get("scopes", []),
             is_owner=bool(payload.get("is_owner", False)),
             claims=payload,
         )

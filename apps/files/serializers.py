@@ -24,6 +24,10 @@ class UploadInitiateSerializer(serializers.Serializer):
 
         if owner_scope == OwnerScope.ORG and not principal.org_id:
             raise serializers.ValidationError("JWT does not include org_id for org owner scope.")
+        if owner_scope == OwnerScope.SERVICE and principal.principal_type != "service":
+            raise serializers.ValidationError("service owner scope requires a service principal.")
+        if principal.principal_type == "service" and owner_scope != OwnerScope.SERVICE:
+            raise serializers.ValidationError("service principals may only create service-owned files.")
         if visibility == Visibility.ORG and owner_scope != OwnerScope.ORG:
             raise serializers.ValidationError("org visibility requires owner_scope=org.")
         return attrs
@@ -64,6 +68,7 @@ class FileSerializer(serializers.ModelSerializer):
             "owner_scope",
             "owner_user_id",
             "owner_org_id",
+            "owner_service_id",
             "visibility",
             "status",
             "folder_id",
@@ -93,3 +98,7 @@ class FolderCreateSerializer(serializers.ModelSerializer):
         model = Folder
         fields = ["id", "name", "parent", "owner_scope", "created_at", "updated_at"]
         read_only_fields = ["id", "created_at", "updated_at"]
+
+
+class FileShareCreateSerializer(serializers.Serializer):
+    expires_in_days = serializers.IntegerField(min_value=1, max_value=365, default=30)
