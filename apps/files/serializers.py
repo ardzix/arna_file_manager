@@ -21,6 +21,15 @@ class UploadInitiateSerializer(serializers.Serializer):
         visibility = attrs["visibility"]
         request = self.context["request"]
         principal = request.user
+        if 'owner_scope' not in self.initial_data and (principal.principal_type == 'device' or principal.tenant_id):
+            owner_scope = attrs['owner_scope'] = OwnerScope.ORG
+        if principal.principal_type == 'device' and owner_scope != OwnerScope.ORG:
+            raise serializers.ValidationError('Devices create tenant-owned files with owner_scope=org.')
+        if owner_scope == OwnerScope.USER and not principal.user_id:
+            raise serializers.ValidationError('A human user is required for personal ownership.')
+        if visibility in {Visibility.PUBLIC, Visibility.SHARED}:
+            from apps.authn.permissions import require_permission
+            require_permission(principal, 'storage.files.share')
 
         if owner_scope == OwnerScope.ORG and not principal.org_id:
             raise serializers.ValidationError("JWT does not include org_id for org owner scope.")
@@ -68,6 +77,8 @@ class FileSerializer(serializers.ModelSerializer):
             "owner_scope",
             "owner_user_id",
             "owner_org_id",
+            "owner_tenant_id",
+            "created_by_device_id",
             "owner_service_id",
             "visibility",
             "status",
@@ -86,6 +97,9 @@ class FileUpdateSerializer(serializers.ModelSerializer):
         file_obj: FileAsset = self.instance
         if value == Visibility.ORG and file_obj.owner_scope != OwnerScope.ORG:
             raise serializers.ValidationError("org visibility requires owner_scope=org.")
+        if value != file_obj.visibility:
+            from apps.authn.permissions import require_permission
+            require_permission(self.context['request'].user, 'storage.files.share')
         return value
 
 
@@ -94,10 +108,20 @@ class FileMoveSerializer(serializers.Serializer):
 
 
 class FolderCreateSerializer(serializers.ModelSerializer):
+    owner_scope = serializers.ChoiceField(choices=[OwnerScope.USER, OwnerScope.ORG], required=False, default=OwnerScope.USER)
+
+    def validate(self, attrs):
+        principal = self.context['request'].user
+        if 'owner_scope' not in self.initial_data and (principal.principal_type == 'device' or principal.tenant_id):
+            attrs['owner_scope'] = OwnerScope.ORG
+        if principal.principal_type == 'device' and attrs['owner_scope'] != OwnerScope.ORG:
+            raise serializers.ValidationError('Devices create tenant-owned folders.')
+        return attrs
+
     class Meta:
         model = Folder
-        fields = ["id", "name", "parent", "owner_scope", "created_at", "updated_at"]
-        read_only_fields = ["id", "created_at", "updated_at"]
+        fields = ["id", "name", "parent", "owner_scope", "owner_org_id", "owner_tenant_id", "created_by_device_id", "created_at", "updated_at"]
+        read_only_fields = ["id", "owner_org_id", "owner_tenant_id", "created_by_device_id", "created_at", "updated_at"]
 
 
 class FileShareCreateSerializer(serializers.Serializer):

@@ -1,11 +1,13 @@
 import hashlib
 import secrets
+import uuid
 from datetime import timedelta
 
 from django.http import HttpResponseRedirect
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from django.conf import settings
+from django.db.models import Q
 from botocore.exceptions import ClientError
 from drf_yasg import openapi
 from drf_yasg.utils import swagger_auto_schema
@@ -27,6 +29,49 @@ from .serializers import (
     UploadInitiateSerializer,
 )
 from .services import S3MultipartService
+from apps.authn.permissions import HasFilePermission, require_permission
+
+
+class FileAPIView(APIView):
+    permission_classes = [IsAuthenticated, HasFilePermission]
+    required_permissions = {}
+
+    def finalize_response(self, request, response, *args, **kwargs):
+        request_id = response.data.get('request_id', str(uuid.uuid4())) if isinstance(getattr(response, 'data', None), dict) else str(uuid.uuid4())
+        response['X-Request-ID'] = request_id
+        if response.status_code >= 400 and isinstance(response.data, dict):
+            error = response.data.get('error')
+            if isinstance(error, dict):
+                response.data = {'error': error.get('code', 'invalid_request'),
+                                 'detail': error.get('message', 'Request could not be completed.')}
+            response.data.setdefault('request_id', request_id)
+        return super().finalize_response(request, response, *args, **kwargs)
+
+
+def _ownership_filter(principal):
+    if principal.principal_type == 'service':
+        return Q(owner_scope=OwnerScope.SERVICE, owner_service_id=principal.service_id)
+    org = Q(owner_scope=OwnerScope.ORG, owner_org_id=principal.org_id, owner_tenant_id=principal.tenant_id)
+    if principal.principal_type == 'device':
+        return org if principal.org_id and principal.tenant_id else Q(pk__in=[])
+    personal = Q(owner_scope=OwnerScope.USER, owner_user_id=principal.user_id)
+    return personal | org if principal.org_id else personal
+
+
+def _file(request, file_id, **filters):
+    return get_object_or_404(FileAsset.objects.filter(_ownership_filter(request.user)),
+                            id=file_id, deleted_at__isnull=True, **filters)
+
+
+def _folder(request, folder_id):
+    principal = request.user
+    if principal.principal_type == 'service':
+        return get_object_or_404(Folder.objects.none(), id=folder_id)
+    return get_object_or_404(Folder.objects.filter(_ownership_filter(principal)), id=folder_id, deleted_at__isnull=True)
+
+
+def _default_scope(principal):
+    return OwnerScope.ORG if principal.principal_type == 'device' or principal.tenant_id else OwnerScope.USER
 
 
 OWNER_SCOPE_QUERY_PARAM = openapi.Parameter(
@@ -117,26 +162,25 @@ COMPLETE_RESPONSE_SCHEMA = openapi.Schema(
 
 def _is_owner(principal, file_obj: FileAsset) -> bool:
     if file_obj.owner_scope == OwnerScope.USER:
-        return str(file_obj.owner_user_id) == str(principal.user_id)
+        return bool(principal.user_id) and str(file_obj.owner_user_id) == str(principal.user_id)
     if file_obj.owner_scope == OwnerScope.ORG:
-        return str(file_obj.owner_org_id) == str(principal.org_id)
-    return str(file_obj.owner_service_id) == str(principal.service_id)
+        return bool(principal.org_id) and str(file_obj.owner_org_id) == str(principal.org_id) and str(file_obj.owner_tenant_id) == str(principal.tenant_id)
+    return bool(principal.service_id) and str(file_obj.owner_service_id) == str(principal.service_id)
 
 
 def _service_scope_denied(principal, required_scope):
-    if principal.principal_type == "service" and required_scope not in principal.scopes:
-        return Response({"error": {"code": "permission_denied", "message": f"Missing scope: {required_scope}"}}, status=403)
+    require_permission(principal, required_scope)
     return None
 
 
 def _can_read(principal, file_obj: FileAsset) -> bool:
+    if principal is not None and getattr(principal, 'is_authenticated', False):
+        require_permission(principal, 'storage.files.read')
     if file_obj.visibility == Visibility.PUBLIC:
         return True
     if principal is None or not getattr(principal, "is_authenticated", False):
         return False
     if _is_owner(principal, file_obj):
-        return True
-    if file_obj.visibility == Visibility.ORG and str(file_obj.owner_org_id) == str(principal.org_id):
         return True
     return False
 
@@ -150,11 +194,11 @@ def _check_file_write_access(principal, file_obj: FileAsset):
 def _check_folder_access(principal, folder: Folder) -> bool:
     if folder.owner_scope == OwnerScope.USER:
         return str(folder.owner_user_id) == str(principal.user_id)
-    return str(folder.owner_org_id) == str(principal.org_id)
+    return bool(principal.org_id) and str(folder.owner_org_id) == str(principal.org_id) and str(folder.owner_tenant_id) == str(principal.tenant_id)
 
 
-class UploadInitiateView(APIView):
-    permission_classes = [IsAuthenticated]
+class UploadInitiateView(FileAPIView):
+    required_permissions = {'POST': 'storage.files.create'}
 
     @swagger_auto_schema(
         tags=["Upload Workflow"],
@@ -193,16 +237,19 @@ class UploadInitiateView(APIView):
             OwnerScope.SERVICE: principal.service_id,
         }[owner_scope]
 
-        s3 = S3MultipartService()
-        storage_key = s3.create_storage_key(owner_scope=owner_scope, owner_id=str(owner_id), file_id=file_id)
-        upload_id = s3.initiate_multipart_upload(storage_key=storage_key, mime_type=data["mime_type"])
-
         folder = None
         folder_id = data.get("folder_id")
         if folder_id:
-            folder = get_object_or_404(Folder, id=folder_id, deleted_at__isnull=True)
+            folder = _folder(request, folder_id)
             if not _check_folder_access(principal, folder):
                 return Response({"error": {"code": "permission_denied", "message": "Folder access denied."}}, status=403)
+
+        if folder and folder.owner_scope != owner_scope:
+            return Response({"error": {"code": "invalid_folder", "message": "Folder ownership must match the file."}}, status=400)
+
+        s3 = S3MultipartService()
+        storage_key = s3.create_storage_key(owner_scope=owner_scope, owner_id=str(owner_id), file_id=file_id)
+        upload_id = s3.initiate_multipart_upload(storage_key=storage_key, mime_type=data["mime_type"])
 
         file_obj = FileAsset(
             id=file_id,
@@ -210,9 +257,11 @@ class UploadInitiateView(APIView):
             owner_scope=owner_scope,
             owner_user_id=principal.user_id if owner_scope == OwnerScope.USER else None,
             owner_org_id=principal.org_id if owner_scope == OwnerScope.ORG else None,
+            owner_tenant_id=principal.tenant_id if owner_scope == OwnerScope.ORG else None,
             owner_service_id=principal.service_id if owner_scope == OwnerScope.SERVICE else None,
             created_by_user_id=principal.user_id if principal.principal_type == "user" else None,
             created_by_service_id=principal.service_id if principal.principal_type == "service" else None,
+            created_by_device_id=principal.device_id,
             visibility=data["visibility"],
             status=FileStatus.UPLOAD_PENDING,
             original_name=data["filename"],
@@ -249,8 +298,8 @@ class UploadInitiateView(APIView):
         )
 
 
-class PresignPartsView(APIView):
-    permission_classes = [IsAuthenticated]
+class PresignPartsView(FileAPIView):
+    required_permissions = {'POST': 'storage.files.create'}
 
     @swagger_auto_schema(
         tags=["Upload Workflow"],
@@ -289,7 +338,7 @@ class PresignPartsView(APIView):
         responses={200: openapi.Response("Presigned URLs returned", schema=PRESIGN_RESPONSE_SCHEMA)},
     )
     def post(self, request, file_id):
-        file_obj = get_object_or_404(FileAsset, id=file_id, deleted_at__isnull=True)
+        file_obj = _file(request, file_id)
         denied = _check_file_write_access(request.user, file_obj)
         if denied:
             return denied
@@ -327,8 +376,8 @@ class PresignPartsView(APIView):
         return Response({"file_id": str(file_obj.id), "parts": parts})
 
 
-class UploadCompleteView(APIView):
-    permission_classes = [IsAuthenticated]
+class UploadCompleteView(FileAPIView):
+    required_permissions = {'POST': 'storage.files.create'}
 
     @swagger_auto_schema(
         tags=["Upload Workflow"],
@@ -342,7 +391,7 @@ class UploadCompleteView(APIView):
         responses={200: openapi.Response("Upload completed", schema=COMPLETE_RESPONSE_SCHEMA)},
     )
     def post(self, request, file_id):
-        file_obj = get_object_or_404(FileAsset, id=file_id, deleted_at__isnull=True)
+        file_obj = _file(request, file_id)
         denied = _check_file_write_access(request.user, file_obj)
         if denied:
             return denied
@@ -390,8 +439,8 @@ class UploadCompleteView(APIView):
         )
 
 
-class UploadAbortView(APIView):
-    permission_classes = [IsAuthenticated]
+class UploadAbortView(FileAPIView):
+    required_permissions = {'POST': 'storage.files.create'}
 
     @swagger_auto_schema(
         tags=["Upload Workflow"],
@@ -403,7 +452,7 @@ class UploadAbortView(APIView):
         responses={200: openapi.Response("Upload aborted")},
     )
     def post(self, request, file_id):
-        file_obj = get_object_or_404(FileAsset, id=file_id, deleted_at__isnull=True)
+        file_obj = _file(request, file_id)
         denied = _check_file_write_access(request.user, file_obj)
         if denied:
             return denied
@@ -423,8 +472,8 @@ class UploadAbortView(APIView):
         return Response({"file_id": str(file_obj.id), "status": file_obj.status})
 
 
-class FileDetailView(APIView):
-    permission_classes = [IsAuthenticated]
+class FileDetailView(FileAPIView):
+    required_permissions = {'GET': 'storage.files.read', 'PATCH': 'storage.files.update', 'DELETE': 'storage.files.delete'}
 
     @swagger_auto_schema(
         operation_summary="Get file metadata",
@@ -438,7 +487,7 @@ class FileDetailView(APIView):
         denied = _service_scope_denied(request.user, "storage.files.read")
         if denied:
             return denied
-        file_obj = get_object_or_404(FileAsset, id=file_id, deleted_at__isnull=True)
+        file_obj = _file(request, file_id)
         if not _can_read(request.user, file_obj):
             return Response({"error": {"code": "permission_denied", "message": "Access denied."}}, status=403)
         return Response(FileSerializer(file_obj).data)
@@ -452,12 +501,12 @@ class FileDetailView(APIView):
         responses={200: FileSerializer},
     )
     def patch(self, request, file_id):
-        file_obj = get_object_or_404(FileAsset, id=file_id, deleted_at__isnull=True)
+        file_obj = _file(request, file_id)
         denied = _check_file_write_access(request.user, file_obj)
         if denied:
             return denied
 
-        serializer = FileUpdateSerializer(instance=file_obj, data=request.data, partial=True)
+        serializer = FileUpdateSerializer(instance=file_obj, data=request.data, partial=True, context={"request": request})
         serializer.is_valid(raise_exception=True)
         serializer.save()
         return Response(FileSerializer(file_obj).data)
@@ -473,7 +522,7 @@ class FileDetailView(APIView):
         denied = _service_scope_denied(request.user, "storage.files.delete")
         if denied:
             return denied
-        file_obj = get_object_or_404(FileAsset, id=file_id, deleted_at__isnull=True)
+        file_obj = _file(request, file_id)
         denied = _check_file_write_access(request.user, file_obj)
         if denied:
             return denied
@@ -499,8 +548,8 @@ class FileDetailView(APIView):
         return Response(status=204)
 
 
-class FileMoveView(APIView):
-    permission_classes = [IsAuthenticated]
+class FileMoveView(FileAPIView):
+    required_permissions = {'POST': 'storage.files.update'}
 
     @swagger_auto_schema(
         operation_summary="Move file to folder",
@@ -512,25 +561,28 @@ class FileMoveView(APIView):
         responses={200: openapi.Response("File moved")},
     )
     def post(self, request, file_id):
-        file_obj = get_object_or_404(FileAsset, id=file_id, deleted_at__isnull=True)
+        file_obj = _file(request, file_id)
         denied = _check_file_write_access(request.user, file_obj)
         if denied:
             return denied
 
         serializer = FileMoveSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        folder = get_object_or_404(Folder, id=serializer.validated_data["folder_id"], deleted_at__isnull=True)
+        folder = _folder(request, serializer.validated_data["folder_id"])
 
         if not _check_folder_access(request.user, folder):
             return Response({"error": {"code": "permission_denied", "message": "Folder access denied."}}, status=403)
 
+        if any(getattr(file_obj, name) != getattr(folder, name) for name in
+               ('owner_scope', 'owner_user_id', 'owner_org_id', 'owner_tenant_id')):
+            return Response({"error": {"code": "invalid_folder", "message": "Move cannot change file ownership or workspace."}}, status=400)
         file_obj.folder = folder
         file_obj.save(update_fields=["folder", "updated_at"])
         return Response({"file_id": str(file_obj.id), "folder_id": str(folder.id)})
 
 
-class FileListView(APIView):
-    permission_classes = [IsAuthenticated]
+class FileListView(FileAPIView):
+    required_permissions = {'GET': 'storage.files.read'}
 
     @swagger_auto_schema(
         operation_summary="List files from root or folder",
@@ -546,7 +598,7 @@ class FileListView(APIView):
         denied = _service_scope_denied(principal, "storage.files.read")
         if denied:
             return denied
-        owner_scope = request.query_params.get("owner_scope", OwnerScope.USER)
+        owner_scope = request.query_params.get("owner_scope", _default_scope(principal))
         folder_id = request.query_params.get("folder_id")
 
         if owner_scope not in {OwnerScope.USER, OwnerScope.ORG, OwnerScope.SERVICE}:
@@ -554,7 +606,7 @@ class FileListView(APIView):
         if owner_scope == OwnerScope.ORG and not principal.org_id:
             return Response({"error": {"code": "invalid_owner_scope", "message": "org_id is required for org scope."}}, status=400)
 
-        files = FileAsset.objects.filter(deleted_at__isnull=True).exclude(status=FileStatus.DELETED)
+        files = FileAsset.objects.filter(_ownership_filter(principal), deleted_at__isnull=True).exclude(status=FileStatus.DELETED)
         if owner_scope == OwnerScope.USER:
             files = files.filter(owner_scope=OwnerScope.USER, owner_user_id=principal.user_id)
         elif owner_scope == OwnerScope.ORG:
@@ -571,8 +623,8 @@ class FileListView(APIView):
         return Response(FileSerializer(files, many=True).data)
 
 
-class FolderCreateView(APIView):
-    permission_classes = [IsAuthenticated]
+class FolderCreateView(FileAPIView):
+    required_permissions = {'POST': 'storage.folders.create'}
 
     @swagger_auto_schema(
         operation_summary="Create folder",
@@ -584,7 +636,7 @@ class FolderCreateView(APIView):
         responses={201: FolderCreateSerializer},
     )
     def post(self, request):
-        serializer = FolderCreateSerializer(data=request.data)
+        serializer = FolderCreateSerializer(data=request.data, context={'request': request})
         serializer.is_valid(raise_exception=True)
 
         owner_scope = serializer.validated_data["owner_scope"]
@@ -596,16 +648,21 @@ class FolderCreateView(APIView):
         if owner_scope == OwnerScope.ORG and not owner_org_id:
             return Response({"error": {"code": "invalid_owner_scope", "message": "org_id is required for org scope."}}, status=400)
 
-        folder = serializer.save(
-            owner_user_id=owner_user_id,
-            owner_org_id=owner_org_id,
-            created_by_user_id=principal.user_id,
-        )
+        parent = serializer.validated_data.get('parent')
+        if parent and (not _check_folder_access(principal, parent) or parent.owner_scope != owner_scope or parent.deleted_at):
+            return Response({"error": {"code": "permission_denied", "message": "Parent folder is outside this ownership/workspace."}}, status=403)
+        if owner_scope == OwnerScope.USER and not principal.user_id:
+            return Response({"error": {"code": "invalid_owner_scope", "message": "Personal folders require a human user."}}, status=400)
+        folder = Folder(**serializer.validated_data, owner_user_id=owner_user_id, owner_org_id=owner_org_id,
+                        owner_tenant_id=principal.tenant_id if owner_scope == OwnerScope.ORG else None,
+                        created_by_user_id=principal.user_id, created_by_device_id=principal.device_id)
+        folder.full_clean()
+        folder.save()
         return Response(FolderCreateSerializer(folder).data, status=201)
 
 
-class FolderChildrenView(APIView):
-    permission_classes = [IsAuthenticated]
+class FolderChildrenView(FileAPIView):
+    required_permissions = {'GET': 'storage.files.read'}
 
     @swagger_auto_schema(
         operation_summary="List folders and files inside folder",
@@ -615,12 +672,12 @@ class FolderChildrenView(APIView):
         responses={200: openapi.Response("Folder children returned")},
     )
     def get(self, request, folder_id):
-        folder = get_object_or_404(Folder, id=folder_id, deleted_at__isnull=True)
+        folder = _folder(request, folder_id)
         if not _check_folder_access(request.user, folder):
             return Response({"error": {"code": "permission_denied", "message": "Folder access denied."}}, status=403)
 
-        child_folders = folder.children.filter(deleted_at__isnull=True).order_by("name")
-        files = folder.files.filter(deleted_at__isnull=True).exclude(status=FileStatus.DELETED).order_by("display_name")
+        child_folders = folder.children.filter(_ownership_filter(request.user), deleted_at__isnull=True).order_by("name")
+        files = folder.files.filter(_ownership_filter(request.user), deleted_at__isnull=True).exclude(status=FileStatus.DELETED).order_by("display_name")
         return Response(
             {
                 "folder": {"id": str(folder.id), "name": folder.name},
@@ -630,8 +687,8 @@ class FolderChildrenView(APIView):
         )
 
 
-class RootChildrenView(APIView):
-    permission_classes = [IsAuthenticated]
+class RootChildrenView(FileAPIView):
+    required_permissions = {'GET': 'storage.files.read'}
 
     @swagger_auto_schema(
         operation_summary="List root folders and files",
@@ -643,15 +700,17 @@ class RootChildrenView(APIView):
     )
     def get(self, request):
         principal = request.user
-        owner_scope = request.query_params.get("owner_scope", OwnerScope.USER)
+        if principal.principal_type == 'service':
+            return Response({'error': {'code': 'invalid_owner_scope', 'message': 'Service folders are not supported.'}}, status=400)
+        owner_scope = request.query_params.get("owner_scope", _default_scope(principal))
 
         if owner_scope not in {OwnerScope.USER, OwnerScope.ORG}:
             return Response({"error": {"code": "invalid_owner_scope", "message": "owner_scope must be user or org."}}, status=400)
         if owner_scope == OwnerScope.ORG and not principal.org_id:
             return Response({"error": {"code": "invalid_owner_scope", "message": "org_id is required for org scope."}}, status=400)
 
-        folders = Folder.objects.filter(parent__isnull=True, deleted_at__isnull=True)
-        files = FileAsset.objects.filter(folder__isnull=True, deleted_at__isnull=True).exclude(status=FileStatus.DELETED)
+        folders = Folder.objects.filter(_ownership_filter(principal), parent__isnull=True, deleted_at__isnull=True)
+        files = FileAsset.objects.filter(_ownership_filter(principal), folder__isnull=True, deleted_at__isnull=True).exclude(status=FileStatus.DELETED)
         if owner_scope == OwnerScope.USER:
             folders = folders.filter(owner_scope=OwnerScope.USER, owner_user_id=principal.user_id)
             files = files.filter(owner_scope=OwnerScope.USER, owner_user_id=principal.user_id)
@@ -670,7 +729,7 @@ class RootChildrenView(APIView):
         )
 
 
-class FileResolveView(APIView):
+class FileResolveView(FileAPIView):
     permission_classes = [AllowAny]
 
     @swagger_auto_schema(
@@ -716,14 +775,14 @@ class FileResolveView(APIView):
         return HttpResponseRedirect(redirect_to=download_url)
 
 
-class FileShareCreateView(APIView):
-    permission_classes = [IsAuthenticated]
+class FileShareCreateView(FileAPIView):
+    required_permissions = {'POST': 'storage.files.share'}
 
     def post(self, request, file_id):
         denied = _service_scope_denied(request.user, "storage.files.share")
         if denied:
             return denied
-        file_obj = get_object_or_404(FileAsset, id=file_id, deleted_at__isnull=True, status=FileStatus.ACTIVE)
+        file_obj = _file(request, file_id, status=FileStatus.ACTIVE)
         denied = _check_file_write_access(request.user, file_obj)
         if denied:
             return denied
@@ -736,6 +795,7 @@ class FileShareCreateView(APIView):
             expires_at=timezone.now() + timedelta(days=serializer.validated_data["expires_in_days"]),
             created_by_user_id=request.user.user_id if request.user.principal_type == "user" else None,
             created_by_service_id=request.user.service_id if request.user.principal_type == "service" else None,
+            created_by_device_id=request.user.device_id,
         )
         if file_obj.visibility != Visibility.SHARED:
             file_obj.visibility = Visibility.SHARED
@@ -750,14 +810,14 @@ class FileShareCreateView(APIView):
         )
 
 
-class FileShareRevokeView(APIView):
-    permission_classes = [IsAuthenticated]
+class FileShareRevokeView(FileAPIView):
+    required_permissions = {'DELETE': 'storage.files.share'}
 
     def delete(self, request, file_id, share_id):
         denied = _service_scope_denied(request.user, "storage.files.share")
         if denied:
             return denied
-        file_obj = get_object_or_404(FileAsset, id=file_id, deleted_at__isnull=True)
+        file_obj = _file(request, file_id)
         denied = _check_file_write_access(request.user, file_obj)
         if denied:
             return denied
@@ -767,7 +827,7 @@ class FileShareRevokeView(APIView):
         return Response(status=204)
 
 
-class FileShareResolveView(APIView):
+class FileShareResolveView(FileAPIView):
     authentication_classes = []
     permission_classes = [AllowAny]
 

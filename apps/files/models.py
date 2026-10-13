@@ -50,14 +50,17 @@ class Folder(TimestampedModel):
     owner_scope = models.CharField(max_length=10, choices=OwnerScope.choices)
     owner_user_id = models.UUIDField(null=True, blank=True)
     owner_org_id = models.UUIDField(null=True, blank=True)
+    owner_tenant_id = models.UUIDField(null=True, blank=True)
     name = models.CharField(max_length=255)
-    created_by_user_id = models.UUIDField()
+    created_by_user_id = models.UUIDField(null=True, blank=True)
+    created_by_device_id = models.UUIDField(null=True, blank=True)
     deleted_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         indexes = [
             models.Index(fields=["owner_scope", "owner_user_id"]),
             models.Index(fields=["owner_scope", "owner_org_id"]),
+            models.Index(fields=['owner_org_id', 'owner_tenant_id', 'deleted_at'], name='folder_org_tenant_idx'),
             models.Index(fields=["parent"]),
         ]
 
@@ -70,6 +73,11 @@ class Folder(TimestampedModel):
             raise ValidationError("owner_org_id must be null for user scope.")
         if self.owner_scope == OwnerScope.ORG and self.owner_user_id:
             raise ValidationError("owner_user_id must be null for org scope.")
+        if self.owner_tenant_id and self.owner_scope != OwnerScope.ORG:
+            raise ValidationError('Tenant ownership requires org scope.')
+        if self.parent and any(getattr(self, name) != getattr(self.parent, name) for name in
+                               ('owner_scope', 'owner_user_id', 'owner_org_id', 'owner_tenant_id')):
+            raise ValidationError('Parent folder must have the same ownership and workspace.')
 
     def __str__(self) -> str:
         return f"{self.name} ({self.owner_scope})"
@@ -81,9 +89,11 @@ class FileAsset(TimestampedModel):
     owner_scope = models.CharField(max_length=10, choices=OwnerScope.choices)
     owner_user_id = models.UUIDField(null=True, blank=True)
     owner_org_id = models.UUIDField(null=True, blank=True)
+    owner_tenant_id = models.UUIDField(null=True, blank=True)
     owner_service_id = models.UUIDField(null=True, blank=True)
     created_by_user_id = models.UUIDField(null=True, blank=True)
     created_by_service_id = models.UUIDField(null=True, blank=True)
+    created_by_device_id = models.UUIDField(null=True, blank=True)
 
     visibility = models.CharField(max_length=10, choices=Visibility.choices, default=Visibility.PRIVATE)
     status = models.CharField(max_length=20, choices=FileStatus.choices, default=FileStatus.UPLOAD_PENDING)
@@ -107,6 +117,7 @@ class FileAsset(TimestampedModel):
         indexes = [
             models.Index(fields=["owner_scope", "owner_user_id", "status"]),
             models.Index(fields=["owner_scope", "owner_org_id", "status"]),
+            models.Index(fields=['owner_org_id', 'owner_tenant_id', 'status'], name='file_org_tenant_idx'),
             models.Index(fields=["owner_scope", "owner_service_id", "status"]),
             models.Index(fields=["folder", "status"]),
             models.Index(fields=["visibility", "status"]),
@@ -142,6 +153,11 @@ class FileAsset(TimestampedModel):
             raise ValidationError("owner_service_id is only valid for service scope.")
         if self.visibility == Visibility.ORG and self.owner_scope != OwnerScope.ORG:
             raise ValidationError("org visibility is only valid for org-owned files.")
+        if self.owner_tenant_id and self.owner_scope != OwnerScope.ORG:
+            raise ValidationError('Tenant ownership requires org scope.')
+        if self.folder and any(getattr(self, name) != getattr(self.folder, name) for name in
+                               ('owner_scope', 'owner_user_id', 'owner_org_id', 'owner_tenant_id')):
+            raise ValidationError('File and folder must have the same ownership and workspace.')
 
     def save(self, *args, **kwargs):
         if not self.stable_url:
@@ -191,6 +207,7 @@ class FileShare(TimestampedModel):
     revoked_at = models.DateTimeField(null=True, blank=True)
     created_by_user_id = models.UUIDField(null=True, blank=True)
     created_by_service_id = models.UUIDField(null=True, blank=True)
+    created_by_device_id = models.UUIDField(null=True, blank=True)
 
     class Meta:
         indexes = [models.Index(fields=["token_hash", "expires_at", "revoked_at"])]

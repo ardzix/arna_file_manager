@@ -37,7 +37,6 @@ pip install -r requirements.txt
 7. Run migrations:
 
 ```bash
-python manage.py makemigrations
 python manage.py migrate
 ```
 
@@ -62,5 +61,9 @@ python manage.py runserver
 
 ## Notes
 
-- Auth uses bearer JWT verification via `public.pem`.
+- Auth requires an SSO RS256 token with issuer `https://sso.arnatech.id` and audience
+  `storage`. Humans and devices obtain it from `/api/v1/devices/resource-token/`.
+- APIs are also available under `/api/v1/`; existing `/api/` routes remain aliases.
+- [Device and tenant access](docs/DEVICE_TENANT_ACCESS.md) describes permissions,
+  ownership, introspection credentials, migrations and isolated tests.
 - If S3 credentials are not configured, presign and completion paths return development placeholder URLs and IDs.

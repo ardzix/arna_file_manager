@@ -7,5 +7,7 @@ django-extensions==3.2.3
 whitenoise==6.8.2
 gunicorn==23.0.0
 python-jose==3.3.0
+PyJWT[crypto]==2.10.1
+requests==2.32.3
 boto3==1.36.26
 psycopg==3.2.13

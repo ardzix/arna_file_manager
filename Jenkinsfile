@@ -1,8 +1,16 @@
 pipeline {
     agent any
 
+    options {
+        timestamps()
+        timeout(time: 45, unit: 'MINUTES')
+        disableConcurrentBuilds()
+    }
+
     environment {
-        DEPLOY = 'true'
+        // Publishing only until the coordinated schema/configuration release.
+        // Do not enable the legacy rollout without a bounded migration gate.
+        DEPLOY = 'false'
 
         // Docker
         DOCKER_IMAGE = 'ardzix/file_manager'
@@ -39,10 +47,12 @@ pipeline {
                     file(credentialsId: 'file-manager-env', variable: 'ENV_FILE'),
                     file(credentialsId: 'sso_public_pem', variable: 'PUBLIC_PEM_FILE')
                 ]) {
-                    sh """
-                        cp "${ENV_FILE}" .env
-                        cp "${PUBLIC_PEM_FILE}" public.pem
-                    """
+                    sh '''
+                        set -eu
+                        set +x
+                        cp "$ENV_FILE" .env
+                        cp "$PUBLIC_PEM_FILE" public.pem
+                    '''
                 }
             }
         }
@@ -52,6 +62,16 @@ pipeline {
                 script {
                     docker.build("${DOCKER_IMAGE}:${DOCKER_TAG}", ".")
                 }
+            }
+        }
+
+        stage('Test isolated file and device contracts') {
+            options { timeout(time: 5, unit: 'MINUTES') }
+            steps {
+                sh '''
+                    set -eu
+                    docker run --rm --network none "$DOCKER_IMAGE:$DOCKER_TAG" python scripts/test_device_access.py
+                '''
             }
         }
 
@@ -111,7 +131,7 @@ EOF
             echo 'Pipeline finished!'
         }
         success {
-            echo 'Deployment successful!'
+            echo 'Tested image published; production rollout is gated separately.'
         }
         failure {
             echo 'Pipeline failed.'

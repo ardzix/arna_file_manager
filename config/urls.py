@@ -25,6 +25,7 @@ urlpatterns = [
     path("swagger", schema_view.with_ui("swagger", cache_timeout=0), name="swagger-ui"),
     path("redoc", schema_view.with_ui("redoc", cache_timeout=0), name="redoc"),
     path("api/", include("apps.files.urls")),
+    path("api/v1/", include("apps.files.urls")),
     path("s/<str:token>", FileShareResolveView.as_view(), name="file-share-resolve"),
     path("<uuid:file_id>", FileResolveView.as_view(), name="file-resolve"),
 ]

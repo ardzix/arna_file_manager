@@ -107,7 +107,7 @@ REST_FRAMEWORK = {
         "rest_framework.parsers.MultiPartParser",
         "rest_framework.parsers.FormParser",
     ],
-    "EXCEPTION_HANDLER": "rest_framework.views.exception_handler",
+    "EXCEPTION_HANDLER": "apps.authn.exceptions.exception_handler",
 }
 
 SWAGGER_SETTINGS = {
@@ -135,6 +135,11 @@ CORS_ALLOW_CREDENTIALS = True
 
 PUBLIC_KEY_PATH = Path(config("PUBLIC_KEY_PATH", default=str(BASE_DIR / "public.pem")))
 JWT_ALGORITHM = config("JWT_ALGORITHM", default="RS256")
+JWT_ISSUER = config('JWT_ISSUER', default='https://sso.arnatech.id')
+JWT_AUDIENCE = config('JWT_AUDIENCE', default='storage')
+SSO_BASE_URL = config('SSO_BASE_URL', default='https://sso.arnatech.id')
+SSO_INTROSPECTION_CLIENT_ID = config('SSO_INTROSPECTION_CLIENT_ID', default='')
+SSO_INTROSPECTION_CLIENT_SECRET = config('SSO_INTROSPECTION_CLIENT_SECRET', default='')
 
 STORAGE_PUBLIC_BASE_URL = config("STORAGE_PUBLIC_BASE_URL", default="https://storage.arnatech.id")
 S3_ENDPOINT_URL = config("S3_ENDPOINT_URL", default=None)
