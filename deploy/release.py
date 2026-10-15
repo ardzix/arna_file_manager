@@ -54,7 +54,7 @@ def validate_configuration(values, old):
         raise RuntimeError('Incomplete file-manager-env credential; missing configured values for: '+', '.join(missing))
     if values.get('DEBUG','false').lower() not in ('false','0') or values.get('SEED_DEMO_DATA','false').lower() not in ('false','0'):
         raise RuntimeError('Production debug and demo seeding must be disabled')
-    ignored = {'PHOTOBOOTH_PRODUCT_CODES','DUMMY_ROLLOUT_TS','PUBLIC_KEY_PATH'}
+    ignored = {'PHOTOBOOTH_PRODUCT_CODES','DUMMY_ROLLOUT_TS','PUBLIC_KEY_PATH','STORAGE_RUNTIME_SECRET_PATH'}
     if any(key not in values for key in old if key not in ignored):
         raise RuntimeError('New credential omits existing runtime settings; refusing configuration loss')
     for key in ('DB_NAME','DB_USER','DB_PASSWORD','DB_HOST','DB_PORT','S3_ACCESS_KEY_ID','S3_SECRET_ACCESS_KEY','S3_BUCKET_NAME','S3_ENDPOINT_URL','S3_REGION_NAME'):
@@ -65,6 +65,69 @@ def validate_configuration(values, old):
     if values.get('SSO_BASE_URL','https://sso.arnatech.id').rstrip('/') != 'https://sso.arnatech.id':
         raise RuntimeError('Wrong SSO backend endpoint')
     return {**values, 'PUBLIC_KEY_PATH':'/run/secrets/'+PUBLIC_KEY_TARGET}
+
+
+def baseline_configuration(container_spec, container_id):
+    values=dict(item.split('=',1) for item in container_spec.get('Env',[]))
+    pointer=values.get('STORAGE_RUNTIME_SECRET_PATH')
+    if pointer:
+        if pointer!='/run/secrets/'+RUNTIME_TARGET:
+            raise RuntimeError('Unexpected existing runtime secret path')
+        code='from pathlib import Path;print(Path('+repr(pointer)+').read_text())'
+        values=json.loads(run(['docker','exec',container_id,'python','-c',code]))
+        if not isinstance(values,dict) or not all(isinstance(k,str) and isinstance(v,str) for k,v in values.items()):
+            raise RuntimeError('Invalid existing private runtime configuration')
+    return values
+
+
+def secret_update_args(container_spec, record):
+    args=[]
+    for mount in container_spec.get('Mounts',[]):
+        if mount['Target'] not in ('/app/.env','/app/public.pem','/etc/supervisor/conf.d/supervisord.conf'):
+            raise RuntimeError('Unexpected runtime mount; review rather than dropping it')
+        args+=['--mount-rm',mount['Target']]
+    for secret in container_spec.get('Secrets',[]):
+        args+=['--secret-rm',secret['SecretName']]
+    for env in container_spec.get('Env',[]):
+        args+=['--env-rm',env.split('=',1)[0]]
+    args+=['--env-add','STORAGE_RUNTIME_SECRET_PATH=/run/secrets/'+RUNTIME_TARGET]
+    for key,target in [('runtime',RUNTIME_TARGET),('public',PUBLIC_KEY_TARGET)]:
+        args+=['--secret-add','source='+record['secrets'][key]+',target='+target+',mode=0400']
+    return args
+
+
+def verify_runtime_spec(container_spec, record):
+    if container_spec.get('Env',[])!=['STORAGE_RUNTIME_SECRET_PATH=/run/secrets/'+RUNTIME_TARGET]:
+        raise RuntimeError('Runtime configuration must be mounted, not exposed as service environment')
+    expected={record['secrets']['runtime']:RUNTIME_TARGET,record['secrets']['public']:PUBLIC_KEY_TARGET}
+    mounted=container_spec.get('Secrets',[])
+    if len(mounted)!=2 or {s['SecretName']:s.get('File',{}).get('Name') for s in mounted}!=expected:
+        raise RuntimeError('Runtime secret mounts differ from the tested release')
+    if any(s.get('File',{}).get('Mode')!=0o400 for s in mounted) or container_spec.get('Mounts'):
+        raise RuntimeError('Runtime secrets must be mounted read-only with mode 0400 and no legacy binds')
+
+
+def prepare_image(folder, source, commit, tag):
+    metadata=json.loads((folder/'cloud-build.json').read_text())
+    if metadata.get('commit')!=commit or metadata.get('tag')!=tag or metadata.get('platform')!='linux/amd64':
+        raise RuntimeError('Build artifact does not match the selected release')
+    mode=metadata.get('build_backend')
+    if mode=='docker-build-cloud':
+        if metadata.get('builder_endpoint')!='arnatechid/default':
+            raise RuntimeError('Unapproved cloud builder')
+        with (folder/'runtime-image.tar').open('rb') as stream:
+            checksum=hashlib.file_digest(stream,'sha256').hexdigest()
+        if checksum!=metadata.get('archive_sha256'):
+            raise RuntimeError('Cloud image archive checksum mismatch')
+        run(['docker','load','--input',str(folder/'runtime-image.tar')],timeout=300)
+    elif mode=='manager-local':
+        run(['docker','build','--platform','linux/amd64','--label','org.opencontainers.image.revision='+commit,'-t',tag,str(source)],timeout=1800,visible=True)
+    else:
+        raise RuntimeError('Unknown build backend; no implicit local fallback')
+    image=json.loads(run(['docker','image','inspect',tag]))[0]
+    if image['Architecture']!='amd64' or image['Config'].get('Labels',{}).get('org.opencontainers.image.revision')!=commit:
+        raise RuntimeError('Built image revision/platform does not match selected release')
+    return metadata,image['Id']
 
 
 def wait_task(service, seconds=180):
@@ -135,7 +198,7 @@ def build(commit, folder):
     if (source/'.env').exists() or list(source.glob('*.pem')):
         raise RuntimeError('Runtime credentials cannot enter build context')
     tag=REPOSITORY+':'+folder.name.removeprefix('storage-')
-    run(['docker','build','--label','org.opencontainers.image.revision='+commit,'-t',tag,str(source)],timeout=1800,visible=True)
+    build_metadata,tested_image_id=prepare_image(folder,source,commit,tag)
     probe='from pathlib import Path;import os;p=Path("/app");assert not (p/".env").exists();assert not list(p.rglob("*.pem"));assert not os.environ.get("DB_PASSWORD");print("Clean runtime image verified")'
     run(['docker','run','--rm','--network','none','--entrypoint','python',tag,'-c',probe],visible=True)
     test_image(tag)
@@ -143,9 +206,10 @@ def build(commit, folder):
     run(['docker','pull',tag],timeout=180)
     image=json.loads(run(['docker','image','inspect',tag]))[0]
     digests=[value for value in image.get('RepoDigests',[]) if value.startswith(REPOSITORY+'@sha256:')]
-    if len(digests)!=1 or image['Architecture']!='amd64':
+    if len(digests)!=1 or image['Architecture']!='amd64' or image['Id']!=tested_image_id:
         raise RuntimeError('Published digest/platform unresolved')
-    record={'commit':commit,'tag':tag,'digest':digests[0],'platform':'linux/amd64','tests':'passed','status':'published'}
+    record={'commit':commit,'tag':tag,'digest':digests[0],'platform':'linux/amd64','tests':'passed','status':'published',
+            'build_backend':build_metadata['build_backend'],'tested_image_id':tested_image_id}
     private_json(folder/'release.json',record)
     print(json.dumps(record),flush=True)
 
@@ -189,7 +253,7 @@ def migrate(commit, folder):
     private_json(folder/'previous-service.json',baseline)
     parse="from decouple import RepositoryEnv;import json;print(json.dumps(RepositoryEnv('/input/runtime.env').data))"
     values=json.loads(run(['docker','run','--rm','--network','none','--mount','type=bind,src='+str(folder/'runtime.env')+',dst=/input/runtime.env,readonly','--entrypoint','python',record['digest'],'-c',parse]))
-    old=dict(item.split('=',1) for item in baseline['Spec']['TaskTemplate']['ContainerSpec'].get('Env',[]))
+    old=baseline_configuration(baseline['Spec']['TaskTemplate']['ContainerSpec'],ids[0])
     values=validate_configuration(values,old)
     oldkey=run(['docker','exec',ids[0],'python','-c',"import django;django.setup();from django.conf import settings;from pathlib import Path;import sys;sys.stdout.write(Path(settings.PUBLIC_KEY_PATH).read_text())"])
     public=(folder/'public.pem').read_text()
@@ -233,6 +297,11 @@ def verify(commit, folder):
         time.sleep(3)
     else:
         raise RuntimeError('Production rollout timed out')
+    verify_runtime_spec(service['Spec']['TaskTemplate']['ContainerSpec'],record)
+    inline_names={v.split('=',1)[0] for v in item['Config'].get('Env',[])}
+    values=baseline_configuration(service['Spec']['TaskTemplate']['ContainerSpec'],ids[0])
+    if inline_names.intersection(values):
+        raise RuntimeError('Runtime configuration leaked into container inspect environment')
     code="""import django;django.setup()
 from django.core.management import call_command
 from apps.authn.introspection import inspector_probe
@@ -266,15 +335,7 @@ def roll(commit, folder):
           '--update-failure-action','rollback','--rollback-parallelism','1','--rollback-order','stop-first',
           '--stop-grace-period','60s','--health-cmd','python /app/deploy/healthcheck.py','--health-interval','15s',
           '--health-timeout','6s','--health-retries','3','--health-start-period','30s']
-    for mount in cs.get('Mounts',[]):
-        if mount['Target'] not in ('/app/.env','/app/public.pem','/etc/supervisor/conf.d/supervisord.conf'):
-            raise RuntimeError('Unexpected runtime mount; review rather than dropping it')
-        args+=['--mount-rm',mount['Target']]
-    for secret in cs.get('Secrets',[]):args+=['--secret-rm',secret['SecretName']]
-    for env in cs.get('Env',[]):args+=['--env-rm',env.split('=',1)[0]]
-    args+=['--env-add','STORAGE_RUNTIME_SECRET_PATH=/run/secrets/'+RUNTIME_TARGET]
-    for key,target in [('runtime',RUNTIME_TARGET),('public',PUBLIC_KEY_TARGET)]:
-        args+=['--secret-add','source='+record['secrets'][key]+',target='+target+',mode=0400']
+    args+=secret_update_args(cs,record)
     run([*args,SERVICE])
     record['status']='deployed'
     private_json(folder/'release.json',record)
@@ -301,7 +362,8 @@ def roll(commit, folder):
 
 
 def cleanup(commit, folder):
-    for path in (folder/'runtime.env', folder/'public.pem', folder/'registry/config.json',folder/'source.tar'):
+    for path in (folder/'runtime.env', folder/'public.pem', folder/'registry/config.json',folder/'source.tar',
+                 folder/'runtime-image.tar'):
         path.unlink(missing_ok=True)
     print('Temporary credential files removed; prior image/config and release evidence retained.',flush=True)
 

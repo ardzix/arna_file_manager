@@ -19,9 +19,14 @@ if [ "$PHASE" = stage ]; then
   ssh_manager "umask 077; mkdir -p '$REMOTE/registry'; chmod 700 '$REMOTE' '$REMOTE/registry'"
   copy_private deploy/release.py entry.py
   copy_private storage-source.tar source.tar
+  copy_private .release-private/registry.json registry/config.json
+  copy_private .release-private/cloud-build.json cloud-build.json
+  if [ -f .release-private/runtime-image.tar ]; then
+    copy_private .release-private/runtime-image.tar runtime-image.tar
+  fi
+elif [ "$PHASE" = configuration ]; then
   copy_private "$STORAGE_ENV_FILE" runtime.env
   copy_private "$STORAGE_PUBLIC_KEY" public.pem
-  copy_private .release-private/registry.json registry/config.json
   ssh_manager "chmod 600 '$REMOTE/runtime.env' '$REMOTE/public.pem' '$REMOTE/registry/config.json'"
 else
   case "$PHASE" in build|migrate|roll|verify|cleanup) ;; *) exit 1 ;; esac

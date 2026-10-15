@@ -3,8 +3,8 @@
 Jenkins `production/arna-file-manager` checks out the configured `main` SCM with
 the job's existing Git credentials. It tests the exact image before publishing,
 then validates configuration, migrates once and rolls the existing `file_manager`
-service by immutable digest. The production release job defaults `DEPLOY=true`;
-disable it for a build-only run. Job concurrency and a manager lock serialize
+service by immutable digest. The release job defaults `DEPLOY=false`;
+enable it only for an intended rollout. Job concurrency and a manager lock serialize
 releases. The approved manager is `arnatech.id` and image platform Linux/amd64.
 
 Existing credential IDs stay unchanged: `file-manager-env`, `sso_public_pem`,
@@ -48,6 +48,42 @@ created, uploaded, shared, moved or deleted. Tests run on SQLite and isolated
 PostgreSQL, including exact IAM grants and org/tenant isolation. Uploaded runtime
 env/public-key/registry files are removed after the job; immutable runtime secrets
 and recovery evidence remain available.
+
+## Cloud build and Portainer visibility
+
+`USE_DOCKER_CLOUD=true` selects the existing `arnatechid/default` Docker Build
+Cloud endpoint on the Jenkins agent. The agent needs a cloud-capable Buildx
+plugin; the manager does not need Buildx. The pipeline registers the endpoint in
+a private per-build Docker/Buildx configuration, exports a Linux/amd64 image
+archive, and transfers it to the manager using pinned SSH. It never sends the
+runtime env or SSO key to Build Cloud. Cloud failure stops the job. An operator
+can explicitly select `USE_DOCKER_CLOUD=false` for a recorded manager-local build;
+there is no automatic fallback. This release intentionally targets the existing
+amd64 production node and does not claim an untested arm64 artifact.
+
+Before any registry publication, the manager checks archive SHA-256, image
+revision/architecture, absence of embedded configuration, isolated PostgreSQL
+application tests and release guards. The pushed/pulled image ID must equal the
+tested image ID. Release evidence includes `build_backend` and immutable digest.
+See [Docker's image export contract](https://docs.docker.com/reference/cli/docker/buildx/build/)
+and [Build Cloud setup](https://docs.docker.com/build-cloud/setup/).
+
+The full runtime env credential is bound only in the configuration/migration
+stage. It is parsed privately and mounted as release-specific Swarm secret
+`/run/secrets/storage_runtime` (mode 0400). The new service spec contains only
+`STORAGE_RUNTIME_SECRET_PATH=/run/secrets/storage_runtime`; every old inline env
+is explicitly removed. Post-roll verification rejects leaked config keys in
+either the Swarm spec or container inspect environment and rejects incorrect
+secret mounts. Subsequent releases read the old private secret for DB/S3
+comparison, so moving away from inline env does not break preservation checks.
+
+Portainer will show the secret names and harmless path pointer, not the DB/S3/SSO
+values in the container environment panel. Docker/host administrators can still
+read mounted secrets through container access; this is not a boundary against
+host administrators. The previous working spec/config is retained privately for
+rollback, so historical inline values in Swarm's previous spec may remain visible
+to administrators until recovery retention is deliberately retired. Deployment
+does not erase old Portainer history or rotate credentials.
 
 For device root listing, use:
 

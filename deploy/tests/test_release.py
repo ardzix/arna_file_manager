@@ -82,3 +82,65 @@ class ReleaseGuardsTests(unittest.TestCase):
             with patch.dict(os.environ,{'STORAGE_RUNTIME_SECRET_PATH':str(path),'DB_HOST':'old'}):
                 with self.assertRaises(RuntimeError):loader.load_runtime_env()
                 self.assertEqual(os.environ['DB_HOST'],'old')
+
+    def test_all_old_values_removed_before_mounting_private_runtime(self):
+        state={'Env':['DB_PASSWORD=synthetic-secret','S3_SECRET_ACCESS_KEY=synthetic-s3','DEBUG=false']}
+        record={'secrets':{'runtime':'release-config','public':'release-key'}}
+        args=release.secret_update_args(state,record)
+        self.assertNotIn('synthetic-secret',' '.join(args))
+        self.assertNotIn('synthetic-s3',' '.join(args))
+        self.assertEqual(args.count('--env-rm'),3)
+        self.assertEqual(args.count('--env-add'),1)
+        self.assertIn('STORAGE_RUNTIME_SECRET_PATH=/run/secrets/storage_runtime',args)
+
+    def test_verify_rejects_inline_credentials_even_with_correct_secret_mounts(self):
+        record={'secrets':{'runtime':'release-config','public':'release-key'}}
+        state={'Env':['STORAGE_RUNTIME_SECRET_PATH=/run/secrets/storage_runtime'],
+               'Secrets':[{'SecretName':name,'File':{'Name':target,'Mode':0o400}}
+                          for name,target in [('release-config','storage_runtime'),('release-key','storage_sso_public')]]}
+        release.verify_runtime_spec(state,record)
+        for bad in ({**state,'Env':state['Env']+['DB_PASSWORD=synthetic']},
+                    {**state,'Secrets':state['Secrets'][:1]},
+                    {**state,'Mounts':[{'Target':'/app/.env'}]}):
+            with self.assertRaises(RuntimeError):release.verify_runtime_spec(bad,record)
+
+    def test_next_release_compares_private_existing_db_and_s3_not_only_pointer(self):
+        pointer={'Env':['STORAGE_RUNTIME_SECRET_PATH=/run/secrets/storage_runtime']}
+        with patch.object(release,'run',return_value=json.dumps(self.config())):
+            previous=release.baseline_configuration(pointer,'synthetic-container')
+        self.assertEqual(previous,self.config())
+        with self.assertRaises(RuntimeError):
+            release.validate_configuration({**self.config(),'DB_PASSWORD':'changed'},previous)
+
+    def test_cloud_archive_mismatch_stops_before_docker_load(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path=Path(folder)
+            (path/'cloud-build.json').write_text(json.dumps({'commit':'a'*40,'platform':'linux/amd64',
+                'tag':'synthetic','build_backend':'docker-build-cloud','builder_endpoint':'arnatechid/default',
+                'archive_sha256':'0'*64}))
+            (path/'runtime-image.tar').write_bytes(b'synthetic-tampered')
+            with patch.object(release,'run') as command:
+                with self.assertRaises(RuntimeError):release.prepare_image(path,path,'a'*40,'synthetic')
+                command.assert_not_called()
+
+    def test_unknown_cloud_backend_never_falls_back_to_local_build(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path=Path(folder)
+            (path/'cloud-build.json').write_text(json.dumps({'commit':'a'*40,'platform':'linux/amd64',
+                'tag':'synthetic','build_backend':'cloud-failed'}))
+            with patch.object(release,'run') as command:
+                with self.assertRaises(RuntimeError):release.prepare_image(path,path,'a'*40,'synthetic')
+                command.assert_not_called()
+
+    def test_cloud_image_from_different_revision_cannot_be_tested_or_published(self):
+        import hashlib
+        with tempfile.TemporaryDirectory() as folder:
+            path=Path(folder)
+            (path/'runtime-image.tar').write_bytes(b'synthetic')
+            (path/'cloud-build.json').write_text(json.dumps({'commit':'a'*40,'platform':'linux/amd64',
+                'tag':'synthetic','build_backend':'docker-build-cloud','builder_endpoint':'arnatechid/default',
+                'archive_sha256':hashlib.sha256(b'synthetic').hexdigest()}))
+            wrong=[{'Architecture':'amd64','Id':'synthetic','Config':{'Labels':{'org.opencontainers.image.revision':'b'*40}}}]
+            with patch.object(release,'run',side_effect=['',json.dumps(wrong)]) as command:
+                with self.assertRaises(RuntimeError):release.prepare_image(path,path,'a'*40,'synthetic')
+                self.assertEqual(command.call_count,2)
