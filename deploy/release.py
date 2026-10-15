@@ -116,7 +116,10 @@ def prepare_image(folder, source, commit, tag):
         if metadata.get('builder_endpoint')!='arnatechid/default':
             raise RuntimeError('Unapproved cloud builder')
         with (folder/'runtime-image.tar').open('rb') as stream:
-            checksum=hashlib.file_digest(stream,'sha256').hexdigest()
+            digest=hashlib.sha256()
+            for chunk in iter(lambda:stream.read(1024*1024),b''):
+                digest.update(chunk)
+            checksum=digest.hexdigest()
         if checksum!=metadata.get('archive_sha256'):
             raise RuntimeError('Cloud image archive checksum mismatch')
         run(['docker','load','--input',str(folder/'runtime-image.tar')],timeout=300)

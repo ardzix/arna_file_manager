@@ -68,7 +68,10 @@ def main():
                  '--label', 'org.opencontainers.image.revision='+commit, '--tag', record['tag'],
                  '--output', 'type=docker,dest='+str(image_tar), str(source)], visible=True)
         with image_tar.open('rb') as stream:
-            record['archive_sha256'] = hashlib.file_digest(stream, 'sha256').hexdigest()
+            checksum = hashlib.sha256()
+            for chunk in iter(lambda: stream.read(1024 * 1024), b''):
+                checksum.update(chunk)
+            record['archive_sha256'] = checksum.hexdigest()
         record['builder_endpoint'] = ENDPOINT
     path = private/'cloud-build.json'
     path.write_text(json.dumps(record))
