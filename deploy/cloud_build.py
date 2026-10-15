@@ -64,9 +64,15 @@ def main():
         source = private/'cloud-source'
         extract_source('storage-source.tar', source)
         image_tar = private/'runtime-image.tar'
-        command(['docker', 'buildx', 'build', '--builder', builder, '--platform', 'linux/amd64',
-                 '--label', 'org.opencontainers.image.revision='+commit, '--tag', record['tag'],
-                 '--output', 'type=docker,dest='+str(image_tar), str(source)], visible=True)
+        # The installed Cloud driver supports --load but rejects a direct tar
+        # destination. Save that same loaded image; do not rebuild on the agent.
+        try:
+            command(['docker', 'buildx', 'build', '--builder', builder, '--platform', 'linux/amd64',
+                     '--label', 'org.opencontainers.image.revision='+commit, '--tag', record['tag'],
+                     '--load', str(source)], visible=True)
+            command(['docker', 'image', 'save', '--output', str(image_tar), record['tag']])
+        finally:
+            subprocess.run(['docker', 'image', 'rm', record['tag']], capture_output=True, timeout=60)
         with image_tar.open('rb') as stream:
             checksum = hashlib.sha256()
             for chunk in iter(lambda: stream.read(1024 * 1024), b''):
