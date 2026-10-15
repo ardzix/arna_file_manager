@@ -17,5 +17,7 @@ RUN pip install --no-cache-dir --upgrade pip && pip install --no-cache-dir -r /a
 COPY . /app
 COPY supervisord.conf /etc/supervisor/conf.d/supervisord.conf
 
+RUN python manage.py collectstatic --noinput
+
 CMD ["/usr/bin/supervisord", "-c", "/etc/supervisor/conf.d/supervisord.conf"]
 

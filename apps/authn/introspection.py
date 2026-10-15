@@ -12,6 +12,15 @@ class SSOUnavailable(APIException):
     default_detail = 'SSO device verification is temporarily unavailable. Retry later.'
 
 
+def inspector_probe():
+    """Verify backend credentials and negative introspection without a customer token."""
+    try:
+        introspect_device('synthetic-invalid-release-check', {})
+    except AuthenticationFailed:
+        return True
+    return False
+
+
 def introspect_device(raw, claims):
     base = settings.SSO_BASE_URL.rstrip('/')
     parsed = urlsplit(base)

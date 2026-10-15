@@ -16,7 +16,10 @@ staticfiles
 **/*.key
 *.pem
 **/*.pem
-!public.pem
+.release-private
+storage-source.tar
+release-commit.txt
+release-id.txt
 *.p12
 *.pfx
 *.tar

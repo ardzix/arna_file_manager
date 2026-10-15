@@ -704,6 +704,10 @@ class RootChildrenView(FileAPIView):
             return Response({'error': {'code': 'invalid_owner_scope', 'message': 'Service folders are not supported.'}}, status=400)
         owner_scope = request.query_params.get("owner_scope", _default_scope(principal))
 
+        if principal.principal_type == 'device' and owner_scope != OwnerScope.ORG:
+            from rest_framework.exceptions import ValidationError
+            raise ValidationError({'owner_scope': 'Device tokens require owner_scope=org for tenant-owned files.'})
+
         if owner_scope not in {OwnerScope.USER, OwnerScope.ORG}:
             return Response({"error": {"code": "invalid_owner_scope", "message": "owner_scope must be user or org."}}, status=400)
         if owner_scope == OwnerScope.ORG and not principal.org_id:

@@ -8,6 +8,14 @@ from .models import FileAsset, FileStatus, Folder
 
 
 class TenantDeviceFileTests(TestCase):
+    def test_device_root_children_requires_org_scope_on_both_route_aliases(self):
+        for prefix in ('/api', '/api/v1'):
+            denied = self.client.get(prefix + '/folders/root/children?owner_scope=user')
+            self.assertEqual(denied.status_code, 400, denied.data)
+            self.assertIn('owner_scope=org', denied.data['detail'])
+            allowed = self.client.get(prefix + '/folders/root/children?owner_scope=org')
+            self.assertEqual(allowed.status_code, 200, allowed.data)
+
     def setUp(self):
         self.org, self.tenant, self.device = map(str, (uuid.uuid4(), uuid.uuid4(), uuid.uuid4()))
         self.principal = TokenPrincipal(principal_type='device', user_id=None, service_id=None, org_id=self.org,

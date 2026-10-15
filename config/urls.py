@@ -6,6 +6,7 @@ from drf_yasg import openapi
 from drf_yasg.views import get_schema_view
 
 from apps.files.views import FileResolveView, FileShareResolveView
+from apps.authn.health import LiveView, ReadyView
 
 schema_view = get_schema_view(
     openapi.Info(
@@ -19,6 +20,8 @@ schema_view = get_schema_view(
 
 
 urlpatterns = [
+    path("health/live", LiveView.as_view(), name="health-live"),
+    path("health/ready", ReadyView.as_view(), name="health-ready"),
     path("", TemplateView.as_view(template_name="landing.html"), name="landing"),
     path("admin/", admin.site.urls),
     path("api/schema.json", schema_view.without_ui(cache_timeout=0), name="schema-json"),

@@ -1,7 +1,9 @@
 from pathlib import Path
 from decouple import config
+from .runtime_env import load_runtime_env
 
 
+load_runtime_env()
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 def cast_debug(value):
@@ -72,6 +74,7 @@ DATABASES = {
         "PASSWORD": config("DB_PASSWORD", default="postgres"),
         "HOST": config("DB_HOST", default="localhost"),
         "PORT": config("DB_PORT", default="5432"),
+        "OPTIONS": {"connect_timeout": 5},
     }
 }
 
