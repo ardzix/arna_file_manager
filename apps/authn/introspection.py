@@ -4,6 +4,7 @@ from urllib.parse import urlsplit
 import requests
 from django.conf import settings
 from rest_framework.exceptions import APIException, AuthenticationFailed
+from .service_token_cache import cache_key, service_token, invalidate
 
 
 class SSOUnavailable(APIException):
@@ -28,16 +29,23 @@ def introspect_device(raw, claims):
             or not settings.SSO_INTROSPECTION_CLIENT_ID or not settings.SSO_INTROSPECTION_CLIENT_SECRET):
         raise SSOUnavailable()
     try:
-        auth = requests.post(base + '/api/auth/service-token/', json={
-            'client_id': settings.SSO_INTROSPECTION_CLIENT_ID,
-            'client_secret': settings.SSO_INTROSPECTION_CLIENT_SECRET, 'audience': 'arna-sso-devices'},
-            timeout=5, allow_redirects=False)
-        if auth.status_code != 200:
-            raise SSOUnavailable()
-        token = auth.json()['access']
-        response = requests.post(base + '/api/v1/devices/introspect/', json={
-            'access_token': raw, 'audience': settings.JWT_AUDIENCE},
-            headers={'Authorization': f'Bearer {token}'}, timeout=5, allow_redirects=False)
+        key = cache_key(base, settings.SSO_INTROSPECTION_CLIENT_ID, settings.SSO_INTROSPECTION_CLIENT_SECRET)
+        def fetch():
+            auth = requests.post(base + '/api/auth/service-token/', json={
+                'client_id': settings.SSO_INTROSPECTION_CLIENT_ID,
+                'client_secret': settings.SSO_INTROSPECTION_CLIENT_SECRET, 'audience': 'arna-sso-devices'},
+                timeout=5, allow_redirects=False)
+            if auth.status_code != 200:
+                raise SSOUnavailable()
+            return auth.json()
+        for attempt in range(2):
+            token = service_token(key, fetch)
+            response = requests.post(base + '/api/v1/devices/introspect/', json={
+                'access_token': raw, 'audience': settings.JWT_AUDIENCE},
+                headers={'Authorization': f'Bearer {token}'}, timeout=5, allow_redirects=False)
+            if response.status_code != 401 or attempt:
+                break
+            invalidate(key, token)
         if response.status_code != 200:
             raise SSOUnavailable()
         data = response.json()
