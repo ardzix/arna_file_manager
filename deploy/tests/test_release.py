@@ -16,6 +16,19 @@ spec.loader.exec_module(loader)
 
 
 class ReleaseGuardsTests(unittest.TestCase):
+    def test_public_python_defaults_do_not_count_as_inline_runtime_secrets(self):
+        release.verify_container_environment(['PATH=/usr/local/bin','LANG=C.UTF-8'],
+            ['PATH=/usr/local/bin','LANG=C.UTF-8'],{'PATH':'/usr/local/bin','LANG':'C.UTF-8','DB_PASSWORD':'synthetic'})
+
+    def test_inline_secrets_and_changed_public_defaults_are_rejected(self):
+        for actual,defaults,values in (
+            (['DB_PASSWORD=synthetic'],[],{'DB_PASSWORD':'synthetic'}),
+            (['DB_PASSWORD=synthetic'],['DB_PASSWORD=synthetic'],{'DB_PASSWORD':'synthetic'}),
+            (['PATH=/changed'],['PATH=/usr/local/bin'],{'PATH':'/changed'}),
+            (['PATH=/changed'],[],{'PATH':'/changed'})):
+            with self.subTest(actual=actual), self.assertRaises(RuntimeError):
+                release.verify_container_environment(actual,defaults,values)
+
     def config(self):
         return {'SECRET_KEY':'synthetic-only-secret','DB_NAME':'synthetic','DB_USER':'postgres',
             'DB_PASSWORD':'synthetic-only','DB_HOST':'postgres','ALLOWED_HOSTS':'storage.arnatech.id',
