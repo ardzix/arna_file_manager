@@ -285,6 +285,18 @@ print('DB, configuration and SSO inspector verified')"""
     print(json.dumps(record),flush=True)
 
 
+def verify_container_environment(container_env, image_env, runtime_values):
+    # Official Python images declare these public execution defaults. A complete
+    # legacy credential may include them; they must still equal the image value.
+    public_defaults={'PATH','LANG','GPG_KEY','PYTHON_VERSION','PYTHON_SHA256',
+                     'PYTHONDONTWRITEBYTECODE','PYTHONUNBUFFERED','DJANGO_SETTINGS_MODULE'}
+    actual=dict(item.split('=',1) for item in container_env)
+    defaults=dict(item.split('=',1) for item in image_env)
+    for key in actual.keys() & runtime_values.keys():
+        if key not in public_defaults or key not in defaults or actual[key]!=defaults[key]:
+            raise RuntimeError('Runtime configuration leaked into container inspect environment')
+
+
 def verify(commit, folder):
     record=artifact(folder,commit)
     deadline=time.monotonic()+300
@@ -301,10 +313,9 @@ def verify(commit, folder):
     else:
         raise RuntimeError('Production rollout timed out')
     verify_runtime_spec(service['Spec']['TaskTemplate']['ContainerSpec'],record)
-    inline_names={v.split('=',1)[0] for v in item['Config'].get('Env',[])}
     values=baseline_configuration(service['Spec']['TaskTemplate']['ContainerSpec'],ids[0])
-    if inline_names.intersection(values):
-        raise RuntimeError('Runtime configuration leaked into container inspect environment')
+    image=json.loads(run(['docker','image','inspect',record['digest']]))[0]
+    verify_container_environment(item['Config'].get('Env',[]),image['Config'].get('Env',[]),values)
     code="""import django;django.setup()
 from django.core.management import call_command
 from apps.authn.introspection import inspector_probe
